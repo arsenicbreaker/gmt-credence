@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback } from 'react'
+import { useEffect, useState, useCallback, useRef } from 'react'
 import { motion, AnimatePresence, useReducedMotion } from 'framer-motion'
 import {
   useAccount,
@@ -9,11 +9,13 @@ import {
   useWaitForTransactionReceipt,
   usePublicClient,
 } from 'wagmi'
+import { parseEventLogs } from 'viem'
 import {
   BadgeCheck,
   CalendarPlus,
   CheckCircle2,
   ChevronRight,
+  Copy,
   LayoutDashboard,
   List,
   Loader2,
@@ -71,6 +73,13 @@ const ABI = [
     type: 'function',
   },
   {
+    inputs: [],
+    name: 'getCredentialCount',
+    outputs: [{ name: '', type: 'uint256' }],
+    stateMutability: 'view',
+    type: 'function',
+  },
+  {
     inputs: [{ name: '', type: 'uint256' }],
     name: 'events',
     outputs: [
@@ -83,6 +92,45 @@ const ABI = [
     ],
     stateMutability: 'view',
     type: 'function',
+  },
+  {
+    inputs: [{ name: '', type: 'uint256' }],
+    name: 'credentials',
+    outputs: [
+      { name: 'id', type: 'uint256' },
+      { name: 'eventId', type: 'uint256' },
+      { name: 'recipient', type: 'address' },
+      { name: 'issuedAt', type: 'uint256' },
+      { name: 'isValid', type: 'bool' },
+    ],
+    stateMutability: 'view',
+    type: 'function',
+  },
+  {
+    type: 'event',
+    name: 'EventCreated',
+    inputs: [
+      { name: 'eventId', type: 'uint256', indexed: true },
+      { name: 'name', type: 'string', indexed: false },
+      { name: 'organizer', type: 'address', indexed: false },
+    ],
+  },
+  {
+    type: 'event',
+    name: 'Attended',
+    inputs: [
+      { name: 'eventId', type: 'uint256', indexed: true },
+      { name: 'attendee', type: 'address', indexed: true },
+    ],
+  },
+  {
+    type: 'event',
+    name: 'CredentialIssued',
+    inputs: [
+      { name: 'credentialId', type: 'uint256', indexed: true },
+      { name: 'eventId', type: 'uint256', indexed: true },
+      { name: 'recipient', type: 'address', indexed: false },
+    ],
   },
 ]
 
@@ -172,6 +220,80 @@ function StatusBanner({ status, tone, onDismiss }) {
   )
 }
 
+/** Shown after a successful tx — surfaces IDs for the next step */
+function ActionResultCard({ result, onVerify, onCopy, copied }) {
+  if (!result) return null
+
+  return (
+    <motion.div
+      role="status"
+      aria-live="polite"
+      initial={{ opacity: 0, y: 8 }}
+      animate={{ opacity: 1, y: 0 }}
+      exit={{ opacity: 0, y: -6 }}
+      className="rounded-lg border border-border bg-card p-4 shadow-soft"
+    >
+      <div className="flex items-start gap-3">
+        <span className="mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-muted">
+          <CheckCircle2 className="h-4 w-4 text-success" aria-hidden />
+        </span>
+        <div className="min-w-0 flex-1">
+          <p className="text-sm font-medium">{result.title}</p>
+          {result.detail && (
+            <p className="mt-0.5 text-xs text-muted-foreground">{result.detail}</p>
+          )}
+
+          {result.credentialId !== undefined && result.credentialId !== null && (
+            <div className="mt-3 rounded-md border border-border bg-muted px-3 py-2.5">
+              <p className="text-[10px] font-medium uppercase tracking-wider text-muted-foreground">
+                Credential ID
+              </p>
+              <div className="mt-1 flex flex-wrap items-center gap-2">
+                <span className="font-mono text-2xl font-semibold tabular-nums tracking-tight">
+                  {String(result.credentialId)}
+                </span>
+                <button
+                  type="button"
+                  className="btn btn-outline h-8 min-h-8 px-2 text-xs"
+                  onClick={() => onCopy?.(String(result.credentialId))}
+                  aria-label="Copy credential ID"
+                >
+                  <Copy className="h-3 w-3" aria-hidden />
+                  {copied ? 'Copied' : 'Copy'}
+                </button>
+              </div>
+              <p className="mt-2 text-xs text-muted-foreground">
+                Use this ID on the Verify page to check authenticity.
+              </p>
+              {onVerify && (
+                <button
+                  type="button"
+                  className="btn btn-primary mt-3 h-9 w-full text-xs sm:w-auto"
+                  onClick={() => onVerify(String(result.credentialId))}
+                >
+                  <Search className="h-3.5 w-3.5" aria-hidden />
+                  Verify this credential
+                </button>
+              )}
+            </div>
+          )}
+
+          {result.eventId !== undefined && result.eventId !== null && result.credentialId === undefined && (
+            <div className="mt-3 inline-flex items-center gap-2 rounded-md border border-border bg-muted px-3 py-2">
+              <span className="text-[10px] font-medium uppercase tracking-wider text-muted-foreground">
+                Event ID
+              </span>
+              <span className="font-mono text-lg font-semibold tabular-nums">
+                {String(result.eventId)}
+              </span>
+            </div>
+          )}
+        </div>
+      </div>
+    </motion.div>
+  )
+}
+
 function StatCard({ label, value, hint, onClick, active }) {
   return (
     <button
@@ -219,7 +341,11 @@ export default function Dashboard() {
   const reduceMotion = useReducedMotion()
 
   const { writeContract, data: hash, error, isPending, reset } = useWriteContract()
-  const { isLoading: isConfirming, isSuccess } = useWaitForTransactionReceipt({ hash })
+  const {
+    data: receipt,
+    isLoading: isConfirming,
+    isSuccess,
+  } = useWaitForTransactionReceipt({ hash })
 
   const [view, setView] = useState('overview')
   const [sidebarOpen, setSidebarOpen] = useState(false)
@@ -240,6 +366,11 @@ export default function Dashboard() {
   const [txStatus, setTxStatus] = useState('')
   const [fieldError, setFieldError] = useState('')
   const [isLoadingEvents, setIsLoadingEvents] = useState(false)
+  /** 'create' | 'attend' | 'issue' | null */
+  const [pendingAction, setPendingAction] = useState(null)
+  const [lastResult, setLastResult] = useState(null)
+  const [copied, setCopied] = useState(false)
+  const handledHash = useRef(null)
 
   const connector = connectors[0]
 
@@ -250,10 +381,36 @@ export default function Dashboard() {
     setVerifyError(null)
   }, [])
 
+  const goVerify = useCallback(
+    (credId) => {
+      setVerifyCredId(credId)
+      setVerifyResult(null)
+      setVerifyError(null)
+      navigate('verify')
+    },
+    [navigate]
+  )
+
+  const copyId = useCallback(async (value) => {
+    try {
+      await navigator.clipboard.writeText(value)
+      setCopied(true)
+      setTimeout(() => setCopied(false), 1500)
+    } catch {
+      /* ignore */
+    }
+  }, [])
+
   const { data: eventCount, refetch: refetchCount } = useReadContract({
     address: CONTRACT_ADDRESS,
     abi: ABI,
     functionName: 'getEventCount',
+  })
+
+  const { data: credentialCount, refetch: refetchCredCount } = useReadContract({
+    address: CONTRACT_ADDRESS,
+    abi: ABI,
+    functionName: 'getCredentialCount',
   })
 
   useEffect(() => {
@@ -314,23 +471,159 @@ export default function Dashboard() {
   useEffect(() => {
     if (isPending) setTxStatus('Confirm in your wallet…')
     else if (isConfirming) setTxStatus('Waiting for confirmation…')
-    else if (isSuccess) {
-      setTxStatus('Transaction confirmed.')
-      setFieldError('')
-      refetchCount()
-      setEventName('')
-      setEventDate('')
-      setEventMetadata('')
-    } else if (error) {
+    else if (error) {
       const msg = error.shortMessage || error.message || 'Transaction failed'
       if (/user rejected|denied|rejected the request/i.test(msg)) {
         setTxStatus('')
+        setPendingAction(null)
         reset()
       } else {
-        setTxStatus(msg)
+        // Surface common revert reasons in plain language
+        let friendly = msg
+        if (/Recipient did not attend/i.test(msg)) {
+          friendly =
+            'Recipient has not attended this event yet. They must Attend first.'
+        } else if (/Not organizer/i.test(msg)) {
+          friendly =
+            'Only the event organizer can issue credentials for this event.'
+        } else if (/Already attended/i.test(msg)) {
+          friendly = 'This wallet already attended this event.'
+        } else if (/Event not active/i.test(msg)) {
+          friendly = 'This event is not active.'
+        } else if (/Event does not exist/i.test(msg)) {
+          friendly = 'Event ID not found. Check the ID and try again.'
+        }
+        setTxStatus(friendly)
+        setFieldError('')
+        setPendingAction(null)
       }
     }
-  }, [isPending, isConfirming, isSuccess, error, refetchCount, reset])
+  }, [isPending, isConfirming, error, reset])
+
+  // Parse logs on confirmed receipt → surface Event ID / Credential ID
+  useEffect(() => {
+    if (!isSuccess || !receipt || !hash) return
+    if (handledHash.current === hash) return
+    handledHash.current = hash
+
+    const action = pendingAction
+    setPendingAction(null)
+    setFieldError('')
+    setTxStatus('')
+    refetchCount()
+    refetchCredCount()
+
+    let logs = []
+    try {
+      logs = parseEventLogs({
+        abi: ABI,
+        logs: receipt.logs,
+      })
+    } catch {
+      logs = []
+    }
+
+    const resolve = async () => {
+      if (action === 'create') {
+        const created = logs.find((l) => l.eventName === 'EventCreated')
+        let eventId =
+          created?.args?.eventId !== undefined
+            ? Number(created.args.eventId)
+            : null
+        if (eventId === null && publicClient) {
+          try {
+            const n = await publicClient.readContract({
+              address: CONTRACT_ADDRESS,
+              abi: ABI,
+              functionName: 'getEventCount',
+            })
+            eventId = Math.max(0, Number(n) - 1)
+          } catch {
+            eventId = 0
+          }
+        }
+        setLastResult({
+          title: 'Event created',
+          detail: 'Share this Event ID so participants can Attend.',
+          eventId: eventId ?? 0,
+        })
+        setEventName('')
+        setEventDate('')
+        setEventMetadata('')
+        return
+      }
+
+      if (action === 'attend') {
+        const attended = logs.find((l) => l.eventName === 'Attended')
+        const eventId =
+          attended?.args?.eventId !== undefined
+            ? Number(attended.args.eventId)
+            : attendEventId !== ''
+              ? Number(attendEventId)
+              : null
+        setLastResult({
+          title: 'Attendance recorded',
+          detail:
+            'This wallet is now checked in. The organizer can issue a credential to this address.',
+          eventId,
+        })
+        return
+      }
+
+      if (action === 'issue') {
+        const issued = logs.find((l) => l.eventName === 'CredentialIssued')
+        let credentialId =
+          issued?.args?.credentialId !== undefined
+            ? Number(issued.args.credentialId)
+            : null
+        const eventIdFromLog =
+          issued?.args?.eventId !== undefined
+            ? Number(issued.args.eventId)
+            : issueEventId !== ''
+              ? Number(issueEventId)
+              : null
+
+        // Fallback: latest credential index from chain after this tx
+        if (credentialId === null && publicClient) {
+          try {
+            const n = await publicClient.readContract({
+              address: CONTRACT_ADDRESS,
+              abi: ABI,
+              functionName: 'getCredentialCount',
+            })
+            if (Number(n) > 0) credentialId = Number(n) - 1
+          } catch {
+            /* ignore */
+          }
+        }
+
+        setLastResult({
+          title: 'Credential issued',
+          detail: 'Save this Credential ID — it is what you verify with.',
+          credentialId: credentialId ?? 0,
+          eventId: eventIdFromLog,
+        })
+        return
+      }
+
+      setLastResult({
+        title: 'Transaction confirmed',
+        detail: hash ? `Tx ${truncate(hash)}` : undefined,
+      })
+    }
+
+    resolve()
+  }, [
+    isSuccess,
+    receipt,
+    hash,
+    pendingAction,
+    refetchCount,
+    refetchCredCount,
+    publicClient,
+    attendEventId,
+    issueEventId,
+  ])
 
   // Esc closes mobile sidebar
   useEffect(() => {
@@ -358,6 +651,8 @@ export default function Dashboard() {
       return
     }
     setFieldError('')
+    setLastResult(null)
+    setPendingAction('create')
     writeContract({
       address: CONTRACT_ADDRESS,
       abi: ABI,
@@ -373,6 +668,8 @@ export default function Dashboard() {
       return
     }
     setFieldError('')
+    setLastResult(null)
+    setPendingAction('attend')
     writeContract({
       address: CONTRACT_ADDRESS,
       abi: ABI,
@@ -392,6 +689,8 @@ export default function Dashboard() {
       return
     }
     setFieldError('')
+    setLastResult(null)
+    setPendingAction('issue')
     writeContract({
       address: CONTRACT_ADDRESS,
       abi: ABI,
@@ -638,15 +937,33 @@ export default function Dashboard() {
                   tone={
                     fieldError || error
                       ? 'error'
-                      : isSuccess
+                      : isSuccess && !txStatus.includes('Waiting') && !txStatus.includes('Confirm')
                         ? 'success'
-                        : 'pending'
+                        : fieldError || error
+                          ? 'error'
+                          : 'pending'
                   }
                   onDismiss={() => {
                     setTxStatus('')
                     setFieldError('')
                     reset()
                   }}
+                />
+              )}
+            </AnimatePresence>
+
+            <AnimatePresence mode="wait">
+              {lastResult && (
+                <ActionResultCard
+                  key={`result-${lastResult.title}-${lastResult.credentialId ?? lastResult.eventId}`}
+                  result={lastResult}
+                  copied={copied}
+                  onCopy={copyId}
+                  onVerify={
+                    lastResult.credentialId !== undefined && lastResult.credentialId !== null
+                      ? goVerify
+                      : undefined
+                  }
                 />
               )}
             </AnimatePresence>
@@ -1044,7 +1361,8 @@ export default function Dashboard() {
                     <div>
                       <h2 className="text-2xl font-semibold tracking-tight">Attend</h2>
                       <p className="mt-1 text-sm text-muted-foreground">
-                        Check in to an event with one transaction.
+                        Check in to an event with one transaction. This does not create a
+                        credential yet — the organizer issues that next.
                       </p>
                     </div>
                     <form className="card space-y-4 p-5" onSubmit={handleAttend}>
@@ -1110,8 +1428,13 @@ export default function Dashboard() {
                         Issue credential
                       </h2>
                       <p className="mt-1 text-sm text-muted-foreground">
-                        Mint a verifiable credential to an attendee.
+                        Mint a credential to someone who already attended.
+                        After success, a <strong className="font-medium text-foreground">Credential ID</strong> appears here for verification.
                       </p>
+                    </div>
+                    <div className="rounded-md border border-border bg-muted px-3 py-2.5 text-xs text-muted-foreground">
+                      Requirements: you must be the <span className="text-foreground">event organizer</span>,
+                      and the recipient must have <span className="text-foreground">Attended</span> first.
                     </div>
                     <form className="card space-y-4 p-5" onSubmit={handleIssue}>
                       {selectedEvent && (
@@ -1141,9 +1464,20 @@ export default function Dashboard() {
                         />
                       </div>
                       <div>
-                        <label htmlFor="issue-recipient" className="label">
-                          Recipient address
-                        </label>
+                        <div className="mb-1.5 flex items-center justify-between gap-2">
+                          <label htmlFor="issue-recipient" className="label mb-0">
+                            Recipient address
+                          </label>
+                          {address && (
+                            <button
+                              type="button"
+                              className="text-xs font-medium text-muted-foreground underline-offset-2 hover:text-foreground hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring rounded-sm"
+                              onClick={() => setIssueRecipient(address)}
+                            >
+                              Use my wallet
+                            </button>
+                          )}
+                        </div>
                         <input
                           id="issue-recipient"
                           className="input font-mono text-xs"
