@@ -445,9 +445,14 @@ export default function Dashboard() {
     return (
       <div className="flex min-h-screen items-center justify-center bg-background px-4">
         <div className="card w-full max-w-sm p-8 text-center shadow-soft">
-          <div className="mx-auto mb-4 flex h-10 w-10 items-center justify-center rounded-md bg-primary text-sm font-bold text-primary-foreground">
-            C
-          </div>
+          <img
+            src="/logo.png"
+            alt=""
+            width={40}
+            height={40}
+            className="mx-auto mb-4 h-10 w-10 rounded-lg object-cover"
+            aria-hidden
+          />
           <h1 className="text-lg font-semibold tracking-tight">Connect to continue</h1>
           <p className="mt-2 text-sm text-muted-foreground">
             Use MetaMask on BOT Chain to manage events and credentials.
@@ -477,12 +482,14 @@ export default function Dashboard() {
     <div className="flex h-full flex-col">
       {/* Brand */}
       <div className="flex h-14 items-center gap-2.5 border-b border-border px-4">
-        <span
-          className="flex h-7 w-7 items-center justify-center rounded-md bg-primary text-xs font-bold text-primary-foreground"
+        <img
+          src="/logo.png"
+          alt=""
+          width={28}
+          height={28}
+          className="h-7 w-7 rounded-md object-cover"
           aria-hidden
-        >
-          C
-        </span>
+        />
         <div className="min-w-0">
           <p className="truncate text-sm font-semibold tracking-tight">Credence</p>
           <p className="truncate text-[11px] text-muted-foreground">BOT Chain</p>

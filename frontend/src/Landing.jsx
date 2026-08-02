@@ -470,12 +470,14 @@ export default function Landing() {
             href="/"
             className="flex items-center gap-2 text-sm font-semibold tracking-tight focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 rounded-sm"
           >
-            <span
-              className="flex h-6 w-6 items-center justify-center rounded-md bg-primary text-[11px] font-bold text-primary-foreground"
+            <img
+              src="/logo.png"
+              alt=""
+              width={24}
+              height={24}
+              className="h-6 w-6 rounded-md object-cover"
               aria-hidden
-            >
-              C
-            </span>
+            />
             Credence
           </a>
 
