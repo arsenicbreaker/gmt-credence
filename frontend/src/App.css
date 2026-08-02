@@ -1,0 +1,152 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  /* Gallery Bone — light */
+  :root {
+    --background: oklch(0.98 0.003 80);
+    --foreground: oklch(0.15 0 0);
+    --card: oklch(1 0 0);
+    --card-foreground: oklch(0.15 0 0);
+    --popover: oklch(1 0 0);
+    --popover-foreground: oklch(0.15 0 0);
+    --primary: oklch(0.20 0 0);
+    --primary-foreground: oklch(0.98 0 0);
+    --secondary: oklch(0.94 0.005 80);
+    --secondary-foreground: oklch(0.15 0 0);
+    --muted: oklch(0.95 0.005 80);
+    --muted-foreground: oklch(0.45 0 0);
+    --accent: oklch(0.90 0.005 80);
+    --accent-foreground: oklch(0.15 0 0);
+    --destructive: oklch(0.55 0.22 25);
+    --destructive-foreground: oklch(0.98 0 0);
+    --success: oklch(0.55 0.14 150);
+    --success-foreground: oklch(0.98 0 0);
+    --border: oklch(0.88 0.005 80);
+    --input: oklch(0.96 0.003 80);
+    --ring: oklch(0.20 0 0);
+    --radius: 0.5rem;
+    --font-sans: "Manrope", ui-sans-serif, system-ui, sans-serif;
+    --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, monospace;
+  }
+
+  /* Gallery Bone — dark */
+  .dark {
+    --background: oklch(0.14 0.003 80);
+    --foreground: oklch(0.96 0.003 80);
+    --card: oklch(0.19 0.005 80);
+    --card-foreground: oklch(0.96 0.003 80);
+    --popover: oklch(0.21 0.005 80);
+    --popover-foreground: oklch(0.96 0.003 80);
+    --primary: oklch(0.92 0 0);
+    --primary-foreground: oklch(0.12 0 0);
+    --secondary: oklch(0.23 0.005 80);
+    --secondary-foreground: oklch(0.96 0.003 80);
+    --muted: oklch(0.21 0.005 80);
+    --muted-foreground: oklch(0.66 0 0);
+    --accent: oklch(0.25 0.005 80);
+    --accent-foreground: oklch(0.96 0.003 80);
+    --destructive: oklch(0.65 0.22 25);
+    --destructive-foreground: oklch(0.98 0 0);
+    --success: oklch(0.70 0.14 150);
+    --success-foreground: oklch(0.12 0 0);
+    --border: oklch(0.27 0.005 80);
+    --input: oklch(0.19 0.005 80);
+    --ring: oklch(0.70 0 0);
+    --radius: 0.5rem;
+  }
+
+  * {
+    @apply border-border;
+  }
+
+  html {
+    @apply antialiased;
+  }
+
+  body {
+    @apply bg-background text-foreground font-sans;
+  }
+}
+
+@layer components {
+  .btn {
+    @apply inline-flex items-center justify-center gap-2 rounded-md text-sm font-medium
+      transition-colors duration-100 ease-out
+      focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background
+      disabled:pointer-events-none disabled:opacity-50
+      min-h-10 px-4 py-2;
+  }
+
+  .btn:active:not(:disabled) {
+    transform: scale(0.98);
+  }
+
+  .btn-primary {
+    background-color: var(--primary);
+    color: var(--primary-foreground);
+  }
+
+  .btn-primary:hover:not(:disabled) {
+    background-color: color-mix(in oklch, var(--primary) 88%, var(--foreground));
+  }
+
+  .btn-outline {
+    @apply border border-border bg-transparent;
+  }
+
+  .btn-outline:hover:not(:disabled) {
+    background-color: var(--accent);
+    color: var(--accent-foreground);
+  }
+
+  .btn-ghost {
+    @apply bg-transparent;
+  }
+
+  .btn-ghost:hover:not(:disabled) {
+    background-color: var(--accent);
+    color: var(--accent-foreground);
+  }
+
+  .btn-destructive {
+    background-color: var(--destructive);
+    color: var(--destructive-foreground);
+  }
+
+  .btn-destructive:hover:not(:disabled) {
+    background-color: color-mix(in oklch, var(--destructive) 88%, black);
+  }
+
+  .card {
+    @apply rounded-lg border border-border bg-card text-card-foreground;
+  }
+
+  .input {
+    @apply flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm
+      placeholder:text-muted-foreground
+      transition-colors duration-100
+      focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background
+      disabled:cursor-not-allowed disabled:opacity-50;
+  }
+
+  .label {
+    @apply mb-1.5 block text-sm font-medium text-foreground;
+  }
+
+  .section-title {
+    @apply text-base font-medium tracking-tight;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
