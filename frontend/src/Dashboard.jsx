@@ -132,6 +132,17 @@ const ABI = [
       { name: 'recipient', type: 'address', indexed: false },
     ],
   },
+  // Optional on newer deploys — used when available
+  {
+    inputs: [
+      { name: '', type: 'uint256' },
+      { name: '', type: 'address' },
+    ],
+    name: 'hasCredential',
+    outputs: [{ name: '', type: 'bool' }],
+    stateMutability: 'view',
+    type: 'function',
+  },
 ]
 
 /* ─────────────────────────────────────────────────────────
@@ -571,6 +582,9 @@ export default function Dashboard() {
           friendly = 'This event is not active.'
         } else if (/Event does not exist/i.test(msg)) {
           friendly = 'Event ID not found. Check the ID and try again.'
+        } else if (/Already issued/i.test(msg)) {
+          friendly =
+            'A credential was already issued to this address for this event. One credential per attendee.'
         }
         setTxStatus(friendly)
         setFieldError('')
@@ -757,16 +771,70 @@ export default function Dashboard() {
     })
   }
 
-  const handleIssue = (e) => {
+  const handleIssue = async (e) => {
     e.preventDefault()
     if (issueEventId === '' || !issueRecipient.trim()) {
       setFieldError('Event ID and recipient are required.')
       return
     }
-    if (!/^0x[a-fA-F0-9]{40}$/.test(issueRecipient.trim())) {
+    const recipient = issueRecipient.trim()
+    if (!/^0x[a-fA-F0-9]{40}$/.test(recipient)) {
       setFieldError('Recipient must be a valid 0x address.')
       return
     }
+
+    // Prevent double-issue before sending a tx
+    if (publicClient) {
+      try {
+        // Prefer on-chain mapping if contract was redeployed with hasCredential
+        try {
+          const already = await publicClient.readContract({
+            address: CONTRACT_ADDRESS,
+            abi: ABI,
+            functionName: 'hasCredential',
+            args: [BigInt(issueEventId), recipient],
+          })
+          if (already) {
+            setFieldError(
+              'Credential already issued to this address for this event. One per attendee.'
+            )
+            return
+          }
+        } catch {
+          // Old contract without hasCredential — scan credentials array
+          const n = await publicClient.readContract({
+            address: CONTRACT_ADDRESS,
+            abi: ABI,
+            functionName: 'getCredentialCount',
+          })
+          const count = Number(n)
+          const eventIdNum = Number(issueEventId)
+          const recipientLower = recipient.toLowerCase()
+          for (let i = 0; i < count; i++) {
+            const cred = await publicClient.readContract({
+              address: CONTRACT_ADDRESS,
+              abi: ABI,
+              functionName: 'credentials',
+              args: [BigInt(i)],
+            })
+            // [id, eventId, recipient, issuedAt, isValid]
+            if (
+              Number(cred[1]) === eventIdNum &&
+              String(cred[2]).toLowerCase() === recipientLower &&
+              cred[4] === true
+            ) {
+              setFieldError(
+                `Already issued (Credential ID ${i}). One credential per attendee.`
+              )
+              return
+            }
+          }
+        }
+      } catch {
+        // If pre-check fails, still allow tx — contract may revert
+      }
+    }
+
     setFieldError('')
     setLastResult(null)
     setPendingAction('issue')
@@ -774,7 +842,7 @@ export default function Dashboard() {
       address: CONTRACT_ADDRESS,
       abi: ABI,
       functionName: 'issueCredential',
-      args: [BigInt(issueEventId), issueRecipient.trim()],
+      args: [BigInt(issueEventId), recipient],
     })
   }
 

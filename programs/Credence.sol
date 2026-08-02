@@ -23,6 +23,8 @@ contract Credence {
     Credential[] public credentials;
 
     mapping(uint256 => mapping(address => bool)) public attendance;
+    /// eventId => recipient => already issued (prevents double credentials)
+    mapping(uint256 => mapping(address => bool)) public hasCredential;
     mapping(uint256 => uint256[]) public eventCredentials;
     mapping(uint256 => address[]) private eventAttendees;
 
@@ -69,6 +71,7 @@ contract Credence {
     {
         require(events[eventId].isActive, "Event not active");
         require(attendance[eventId][recipient], "Recipient did not attend");
+        require(!hasCredential[eventId][recipient], "Already issued");
 
         uint256 credId = credentials.length;
         credentials.push(Credential({
@@ -79,6 +82,7 @@ contract Credence {
             isValid: true
         }));
 
+        hasCredential[eventId][recipient] = true;
         eventCredentials[eventId].push(credId);
         emit CredentialIssued(credId, eventId, recipient);
     }
