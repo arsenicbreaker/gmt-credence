@@ -220,41 +220,110 @@ function StatusBanner({ status, tone, onDismiss }) {
   )
 }
 
-/** Shown after a successful tx — surfaces IDs for the next step */
-function ActionResultCard({ result, onVerify, onCopy, copied }) {
+/**
+ * Success popup after create / attend / issue.
+ * Closable: X button, backdrop click, Escape.
+ */
+function ActionResultModal({ result, onClose, onVerify, onCopy, copied, reduceMotion }) {
+  useEffect(() => {
+    if (!result) return
+    const onKey = (e) => {
+      if (e.key === 'Escape') onClose?.()
+    }
+    window.addEventListener('keydown', onKey)
+    // Lock body scroll while open
+    const prev = document.body.style.overflow
+    document.body.style.overflow = 'hidden'
+    return () => {
+      window.removeEventListener('keydown', onKey)
+      document.body.style.overflow = prev
+    }
+  }, [result, onClose])
+
   if (!result) return null
+
+  const hasCredential =
+    result.credentialId !== undefined && result.credentialId !== null
+  const hasEventOnly =
+    result.eventId !== undefined &&
+    result.eventId !== null &&
+    !hasCredential
 
   return (
     <motion.div
-      role="status"
-      aria-live="polite"
-      initial={{ opacity: 0, y: 8 }}
-      animate={{ opacity: 1, y: 0 }}
-      exit={{ opacity: 0, y: -6 }}
-      className="rounded-lg border border-border bg-card p-4 shadow-soft"
+      className="fixed inset-0 z-50 flex items-center justify-center p-4"
+      initial={{ opacity: 0 }}
+      animate={{ opacity: 1 }}
+      exit={{ opacity: 0 }}
+      transition={{ duration: reduceMotion ? 0 : 0.15 }}
     >
-      <div className="flex items-start gap-3">
-        <span className="mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-muted">
-          <CheckCircle2 className="h-4 w-4 text-success" aria-hidden />
-        </span>
-        <div className="min-w-0 flex-1">
-          <p className="text-sm font-medium">{result.title}</p>
-          {result.detail && (
-            <p className="mt-0.5 text-xs text-muted-foreground">{result.detail}</p>
-          )}
+      {/* Backdrop */}
+      <button
+        type="button"
+        className="absolute inset-0 bg-foreground/25 backdrop-blur-[2px] dark:bg-foreground/40"
+        aria-label="Close dialog"
+        onClick={onClose}
+      />
 
-          {result.credentialId !== undefined && result.credentialId !== null && (
-            <div className="mt-3 rounded-md border border-border bg-muted px-3 py-2.5">
+      {/* Dialog */}
+      <motion.div
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="result-dialog-title"
+        initial={reduceMotion ? false : { opacity: 0, y: 12, scale: 0.98 }}
+        animate={{ opacity: 1, y: 0, scale: 1 }}
+        exit={reduceMotion ? undefined : { opacity: 0, y: 8, scale: 0.98 }}
+        transition={
+          reduceMotion
+            ? { duration: 0 }
+            : { type: 'spring', stiffness: 400, damping: 32 }
+        }
+        className="relative z-10 w-full max-w-sm overflow-hidden rounded-2xl border border-border bg-card shadow-[0_8px_40px_rgba(0,0,0,0.12)] dark:shadow-[0_8px_40px_rgba(0,0,0,0.45)]"
+      >
+        {/* Header */}
+        <div className="flex items-start justify-between gap-3 border-b border-border px-5 py-4">
+          <div className="flex items-start gap-3 min-w-0">
+            <span className="mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-muted">
+              <CheckCircle2 className="h-4 w-4 text-success" aria-hidden />
+            </span>
+            <div className="min-w-0">
+              <h2
+                id="result-dialog-title"
+                className="text-sm font-semibold tracking-tight"
+              >
+                {result.title}
+              </h2>
+              {result.detail && (
+                <p className="mt-0.5 text-xs leading-relaxed text-muted-foreground">
+                  {result.detail}
+                </p>
+              )}
+            </div>
+          </div>
+          <button
+            type="button"
+            className="btn btn-ghost h-8 w-8 min-h-8 shrink-0 p-0"
+            onClick={onClose}
+            aria-label="Close"
+          >
+            <X className="h-4 w-4" />
+          </button>
+        </div>
+
+        {/* Body */}
+        <div className="px-5 py-4">
+          {hasCredential && (
+            <div className="rounded-lg border border-border bg-muted px-3 py-3">
               <p className="text-[10px] font-medium uppercase tracking-wider text-muted-foreground">
                 Credential ID
               </p>
-              <div className="mt-1 flex flex-wrap items-center gap-2">
-                <span className="font-mono text-2xl font-semibold tabular-nums tracking-tight">
+              <div className="mt-1.5 flex flex-wrap items-center gap-2">
+                <span className="font-mono text-3xl font-semibold tabular-nums tracking-tight">
                   {String(result.credentialId)}
                 </span>
                 <button
                   type="button"
-                  className="btn btn-outline h-8 min-h-8 px-2 text-xs"
+                  className="btn btn-outline h-8 min-h-8 px-2.5 text-xs"
                   onClick={() => onCopy?.(String(result.credentialId))}
                   aria-label="Copy credential ID"
                 >
@@ -265,31 +334,41 @@ function ActionResultCard({ result, onVerify, onCopy, copied }) {
               <p className="mt-2 text-xs text-muted-foreground">
                 Use this ID on the Verify page to check authenticity.
               </p>
-              {onVerify && (
-                <button
-                  type="button"
-                  className="btn btn-primary mt-3 h-9 w-full text-xs sm:w-auto"
-                  onClick={() => onVerify(String(result.credentialId))}
-                >
-                  <Search className="h-3.5 w-3.5" aria-hidden />
-                  Verify this credential
-                </button>
-              )}
             </div>
           )}
 
-          {result.eventId !== undefined && result.eventId !== null && result.credentialId === undefined && (
-            <div className="mt-3 inline-flex items-center gap-2 rounded-md border border-border bg-muted px-3 py-2">
-              <span className="text-[10px] font-medium uppercase tracking-wider text-muted-foreground">
+          {hasEventOnly && (
+            <div className="rounded-lg border border-border bg-muted px-3 py-3">
+              <p className="text-[10px] font-medium uppercase tracking-wider text-muted-foreground">
                 Event ID
-              </span>
-              <span className="font-mono text-lg font-semibold tabular-nums">
+              </p>
+              <p className="mt-1.5 font-mono text-3xl font-semibold tabular-nums tracking-tight">
                 {String(result.eventId)}
-              </span>
+              </p>
             </div>
           )}
         </div>
-      </div>
+
+        {/* Footer actions */}
+        <div className="flex flex-col-reverse gap-2 border-t border-border px-5 py-4 sm:flex-row sm:justify-end">
+          <button type="button" className="btn btn-outline h-9" onClick={onClose}>
+            Close
+          </button>
+          {hasCredential && onVerify && (
+            <button
+              type="button"
+              className="btn btn-primary h-9"
+              onClick={() => {
+                onVerify(String(result.credentialId))
+                onClose?.()
+              }}
+            >
+              <Search className="h-3.5 w-3.5" aria-hidden />
+              Verify this credential
+            </button>
+          )}
+        </div>
+      </motion.div>
     </motion.div>
   )
 }
@@ -953,22 +1032,6 @@ export default function Dashboard() {
             </AnimatePresence>
 
             <AnimatePresence mode="wait">
-              {lastResult && (
-                <ActionResultCard
-                  key={`result-${lastResult.title}-${lastResult.credentialId ?? lastResult.eventId}`}
-                  result={lastResult}
-                  copied={copied}
-                  onCopy={copyId}
-                  onVerify={
-                    lastResult.credentialId !== undefined && lastResult.credentialId !== null
-                      ? goVerify
-                      : undefined
-                  }
-                />
-              )}
-            </AnimatePresence>
-
-            <AnimatePresence mode="wait">
               <motion.div
                 key={view}
                 initial={reduceMotion ? false : PANEL.initial}
@@ -1599,6 +1662,25 @@ export default function Dashboard() {
           </div>
         </main>
       </div>
+
+      {/* Success popup — closable overlay */}
+      <AnimatePresence>
+        {lastResult && (
+          <ActionResultModal
+            key={`result-${lastResult.title}-${lastResult.credentialId ?? lastResult.eventId}`}
+            result={lastResult}
+            copied={copied}
+            onCopy={copyId}
+            onClose={() => setLastResult(null)}
+            reduceMotion={reduceMotion}
+            onVerify={
+              lastResult.credentialId !== undefined && lastResult.credentialId !== null
+                ? goVerify
+                : undefined
+            }
+          />
+        )}
+      </AnimatePresence>
     </div>
   )
 }
