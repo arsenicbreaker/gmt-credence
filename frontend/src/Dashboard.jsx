@@ -8,6 +8,7 @@ import {
   useReadContract,
   useWaitForTransactionReceipt,
   usePublicClient,
+  useSignMessage,
 } from 'wagmi'
 import { parseEventLogs } from 'viem'
 import {
@@ -27,7 +28,7 @@ import {
   XCircle,
 } from 'lucide-react'
 
-const CONTRACT_ADDRESS = '0xb73E31CA3eAD386661dcf92A7Fb461e02aC1518C'
+const CONTRACT_ADDRESS = '0xa52A5686fC9bf0Ba33E0501D7f775E09f8a76cD7'
 
 const ABI = [
   {
@@ -37,13 +38,6 @@ const ABI = [
       { name: 'metadata', type: 'string' },
     ],
     name: 'createEvent',
-    outputs: [],
-    stateMutability: 'nonpayable',
-    type: 'function',
-  },
-  {
-    inputs: [{ name: 'eventId', type: 'uint256' }],
-    name: 'attend',
     outputs: [],
     stateMutability: 'nonpayable',
     type: 'function',
@@ -117,14 +111,6 @@ const ABI = [
   },
   {
     type: 'event',
-    name: 'Attended',
-    inputs: [
-      { name: 'eventId', type: 'uint256', indexed: true },
-      { name: 'attendee', type: 'address', indexed: true },
-    ],
-  },
-  {
-    type: 'event',
     name: 'CredentialIssued',
     inputs: [
       { name: 'credentialId', type: 'uint256', indexed: true },
@@ -132,7 +118,6 @@ const ABI = [
       { name: 'recipient', type: 'address', indexed: false },
     ],
   },
-  // Optional on newer deploys — used when available
   {
     inputs: [
       { name: '', type: 'uint256' },
@@ -177,6 +162,52 @@ const PANEL = {
 function truncate(addr) {
   if (!addr || addr.length < 10) return addr || '—'
   return `${addr.slice(0, 6)}…${addr.slice(-4)}`
+}
+
+function sameAddress(a, b) {
+  if (!a || !b) return false
+  return String(a).toLowerCase() === String(b).toLowerCase()
+}
+
+/** Gasless check-in storage (signed message — no chain tx, no gas). */
+const CHECKIN_STORAGE_KEY = 'credence:checkins'
+
+function buildCheckInMessage(eventId, attendee) {
+  return [
+    'Credence free check-in',
+    `Event ID: ${eventId}`,
+    `Attendee: ${attendee}`,
+    'Network: BOT Chain',
+    'This is not a transaction and costs no gas.',
+  ].join('\n')
+}
+
+function readCheckIns() {
+  try {
+    const raw = localStorage.getItem(CHECKIN_STORAGE_KEY)
+    if (!raw) return {}
+    const parsed = JSON.parse(raw)
+    return parsed && typeof parsed === 'object' ? parsed : {}
+  } catch {
+    return {}
+  }
+}
+
+function getLocalCheckIn(eventId, attendee) {
+  if (eventId === '' || eventId === null || !attendee) return null
+  const all = readCheckIns()
+  const byEvent = all[String(eventId)]
+  if (!byEvent) return null
+  return byEvent[String(attendee).toLowerCase()] || null
+}
+
+function saveLocalCheckIn(eventId, attendee, payload) {
+  const all = readCheckIns()
+  const key = String(eventId)
+  const addr = String(attendee).toLowerCase()
+  if (!all[key]) all[key] = {}
+  all[key][addr] = payload
+  localStorage.setItem(CHECKIN_STORAGE_KEY, JSON.stringify(all))
 }
 
 function formatDate(ts) {
@@ -432,6 +463,12 @@ export default function Dashboard() {
 
   const { writeContract, data: hash, error, isPending, reset } = useWriteContract()
   const {
+    signMessageAsync,
+    isPending: isSigning,
+    error: signError,
+    reset: resetSign,
+  } = useSignMessage()
+  const {
     data: receipt,
     isLoading: isConfirming,
     isSuccess,
@@ -456,10 +493,14 @@ export default function Dashboard() {
   const [txStatus, setTxStatus] = useState('')
   const [fieldError, setFieldError] = useState('')
   const [isLoadingEvents, setIsLoadingEvents] = useState(false)
-  /** 'create' | 'attend' | 'issue' | null */
+  /** 'create' | 'issue' | null — attend is gasless (no tx) */
   const [pendingAction, setPendingAction] = useState(null)
   const [lastResult, setLastResult] = useState(null)
   const [copied, setCopied] = useState(false)
+  /** True while reading chain before wallet prompt */
+  const [isPreChecking, setIsPreChecking] = useState(false)
+  /** Bumps when local gasless check-in is saved */
+  const [checkInVersion, setCheckInVersion] = useState(0)
   const handledHash = useRef(null)
 
   const connector = connectors[0]
@@ -502,6 +543,19 @@ export default function Dashboard() {
     abi: ABI,
     functionName: 'getCredentialCount',
   })
+
+  // Gasless check-in is stored locally after a free wallet signature (no gas).
+  const attendIdParsed =
+    attendEventId !== '' && attendEventId !== null && !Number.isNaN(Number(attendEventId))
+      ? BigInt(attendEventId)
+      : null
+  // checkInVersion forces re-read from localStorage after a successful sign
+  const alreadyAttended = Boolean(
+    checkInVersion >= 0 &&
+      address &&
+      attendIdParsed !== null &&
+      getLocalCheckIn(Number(attendEventId), address)
+  )
 
   useEffect(() => {
     let cancelled = false
@@ -559,25 +613,26 @@ export default function Dashboard() {
   }, [eventCount, publicClient])
 
   useEffect(() => {
-    if (isPending) setTxStatus('Confirm in your wallet…')
+    if (isSigning) setTxStatus('Sign the free check-in in your wallet (no gas)…')
+    else if (isPending) setTxStatus('Confirm in your wallet…')
     else if (isConfirming) setTxStatus('Waiting for confirmation…')
-    else if (error) {
-      const msg = error.shortMessage || error.message || 'Transaction failed'
+    else if (error || signError) {
+      const err = error || signError
+      const msg = err.shortMessage || err.message || 'Request failed'
       if (/user rejected|denied|rejected the request/i.test(msg)) {
         setTxStatus('')
         setPendingAction(null)
         reset()
+        resetSign()
       } else {
         // Surface common revert reasons in plain language
         let friendly = msg
-        if (/Recipient did not attend/i.test(msg)) {
-          friendly =
-            'Recipient has not attended this event yet. They must Attend first.'
-        } else if (/Not organizer/i.test(msg)) {
+        if (/Not organizer/i.test(msg)) {
           friendly =
             'Only the event organizer can issue credentials for this event.'
-        } else if (/Already attended/i.test(msg)) {
-          friendly = 'This wallet already attended this event.'
+        } else if (/Cannot issue to yourself|Cannot issue to organizer/i.test(msg)) {
+          friendly =
+            'You cannot issue a credential to yourself. Enter an attendee wallet address.'
         } else if (/Event not active/i.test(msg)) {
           friendly = 'This event is not active.'
         } else if (/Event does not exist/i.test(msg)) {
@@ -591,7 +646,7 @@ export default function Dashboard() {
         setPendingAction(null)
       }
     }
-  }, [isPending, isConfirming, error, reset])
+  }, [isPending, isConfirming, isSigning, error, signError, reset, resetSign])
 
   // Parse logs on confirmed receipt → surface Event ID / Credential ID
   useEffect(() => {
@@ -637,29 +692,13 @@ export default function Dashboard() {
         }
         setLastResult({
           title: 'Event created',
-          detail: 'Share this Event ID so participants can Attend.',
+          detail:
+            'Share this Event ID so participants can check in for free (no gas).',
           eventId: eventId ?? 0,
         })
         setEventName('')
         setEventDate('')
         setEventMetadata('')
-        return
-      }
-
-      if (action === 'attend') {
-        const attended = logs.find((l) => l.eventName === 'Attended')
-        const eventId =
-          attended?.args?.eventId !== undefined
-            ? Number(attended.args.eventId)
-            : attendEventId !== ''
-              ? Number(attendEventId)
-              : null
-        setLastResult({
-          title: 'Attendance recorded',
-          detail:
-            'This wallet is now checked in. The organizer can issue a credential to this address.',
-          eventId,
-        })
         return
       }
 
@@ -714,7 +753,6 @@ export default function Dashboard() {
     refetchCount,
     refetchCredCount,
     publicClient,
-    attendEventId,
     issueEventId,
   ])
 
@@ -727,10 +765,24 @@ export default function Dashboard() {
     return () => window.removeEventListener('keydown', onKey)
   }, [])
 
-  const busy = isPending || isConfirming
+  const busy = isPending || isConfirming || isPreChecking || isSigning
   const count = Number(eventCount ?? 0)
   const activeCount = events.filter((e) => e.isActive).length
   const currentNav = NAV.find((n) => n.id === view)
+
+  // Resolve selected attend event from list (for organizer / already-attended UI)
+  const attendEventMeta =
+    attendIdParsed !== null
+      ? events.find((e) => e.id === Number(attendEventId)) ||
+        (selectedEvent && selectedEvent.id === Number(attendEventId)
+          ? selectedEvent
+          : null)
+      : null
+  const isOrganizerOfAttendEvent = Boolean(
+    address &&
+      attendEventMeta?.organizer &&
+      sameAddress(address, attendEventMeta.organizer)
+  )
 
   const handleCreateEvent = (e) => {
     e.preventDefault()
@@ -754,21 +806,106 @@ export default function Dashboard() {
     })
   }
 
-  const handleAttend = (e) => {
+  const handleAttend = async (e) => {
     e?.preventDefault?.()
     if (attendEventId === '' || attendEventId === null) {
       setFieldError('Enter an event ID.')
       return
     }
+    if (!address) {
+      setFieldError('Connect your wallet first.')
+      return
+    }
+    if (!publicClient) {
+      setFieldError('RPC client unavailable. Try again in a moment.')
+      return
+    }
+
+    const eventIdNum = Number(attendEventId)
+    const eventId = BigInt(attendEventId)
+
+    // Already checked in locally (gasless)
+    if (getLocalCheckIn(eventIdNum, address)) {
+      setFieldError(
+        'This wallet already checked in to this event (free check-in on this device).'
+      )
+      setCheckInVersion((v) => v + 1)
+      return
+    }
+
+    // Read-only RPC checks — no write tx, no gas
+    setIsPreChecking(true)
     setFieldError('')
+    setTxStatus('')
+    try {
+      const total = await publicClient.readContract({
+        address: CONTRACT_ADDRESS,
+        abi: ABI,
+        functionName: 'getEventCount',
+      })
+      if (eventId >= total) {
+        setFieldError('Event ID not found. Check the ID and try again.')
+        return
+      }
+
+      const ev = await publicClient.readContract({
+        address: CONTRACT_ADDRESS,
+        abi: ABI,
+        functionName: 'events',
+        args: [eventId],
+      })
+      // events(): [id, name, date, metadata, organizer, isActive]
+      if (ev[5] !== true) {
+        setFieldError('This event is not active.')
+        return
+      }
+
+      // Organizer hosts — only other wallets may check in
+      if (sameAddress(ev[4], address)) {
+        setFieldError(
+          'You created this event — organizers cannot check in to their own event. Share the Event ID so others can check in free.'
+        )
+        return
+      }
+    } catch {
+      setFieldError('Could not load this event. Check the network and try again.')
+      return
+    } finally {
+      setIsPreChecking(false)
+    }
+
+    // Free wallet signature only — not a transaction, costs no gas
     setLastResult(null)
-    setPendingAction('attend')
-    writeContract({
-      address: CONTRACT_ADDRESS,
-      abi: ABI,
-      functionName: 'attend',
-      args: [BigInt(attendEventId)],
-    })
+    setTxStatus('Sign the free check-in in your wallet (no gas)…')
+    const message = buildCheckInMessage(eventIdNum, address)
+    try {
+      const signature = await signMessageAsync({ message })
+      saveLocalCheckIn(eventIdNum, address, {
+        signature,
+        message,
+        signedAt: Date.now(),
+        attendee: address,
+        eventId: eventIdNum,
+      })
+      setCheckInVersion((v) => v + 1)
+      setTxStatus('')
+      setFieldError('')
+      setLastResult({
+        title: 'Checked in — free',
+        detail:
+          'No gas used. Share your wallet address with the organizer so they can issue your credential on-chain.',
+        eventId: eventIdNum,
+      })
+    } catch (err) {
+      const msg = err?.shortMessage || err?.message || ''
+      if (/user rejected|denied|rejected the request/i.test(msg)) {
+        setTxStatus('')
+        resetSign()
+        return
+      }
+      setTxStatus('')
+      setFieldError(msg || 'Check-in signature failed.')
+    }
   }
 
   const handleIssue = async (e) => {
@@ -783,16 +920,56 @@ export default function Dashboard() {
       return
     }
 
-    // Prevent double-issue before sending a tx
+    // Pre-check before wallet prompt — avoid failed txs in testnet history
     if (publicClient) {
+      setIsPreChecking(true)
+      setFieldError('')
       try {
+        const eventId = BigInt(issueEventId)
+        const total = await publicClient.readContract({
+          address: CONTRACT_ADDRESS,
+          abi: ABI,
+          functionName: 'getEventCount',
+        })
+        if (eventId >= total) {
+          setFieldError('Event ID not found. Check the ID and try again.')
+          return
+        }
+
+        const ev = await publicClient.readContract({
+          address: CONTRACT_ADDRESS,
+          abi: ABI,
+          functionName: 'events',
+          args: [eventId],
+        })
+        // events(): [id, name, date, metadata, organizer, isActive]
+        const organizer = ev[4]
+        if (!sameAddress(organizer, address)) {
+          setFieldError(
+            'Only the event organizer can issue credentials for this event.'
+          )
+          return
+        }
+        if (ev[5] !== true) {
+          setFieldError('This event is not active.')
+          return
+        }
+        // Organizer issues to attendees — never to themselves
+        if (sameAddress(recipient, address) || sameAddress(recipient, organizer)) {
+          setFieldError(
+            'You cannot issue a credential to yourself. Enter an attendee wallet address.'
+          )
+          return
+        }
+
+        // Check-in is gasless/off-chain; issue is the on-chain step (gas).
         // Prefer on-chain mapping if contract was redeployed with hasCredential
         try {
           const already = await publicClient.readContract({
             address: CONTRACT_ADDRESS,
             abi: ABI,
             functionName: 'hasCredential',
-            args: [BigInt(issueEventId), recipient],
+            args: [eventId, recipient],
           })
           if (already) {
             setFieldError(
@@ -807,10 +984,10 @@ export default function Dashboard() {
             abi: ABI,
             functionName: 'getCredentialCount',
           })
-          const count = Number(n)
+          const credCount = Number(n)
           const eventIdNum = Number(issueEventId)
           const recipientLower = recipient.toLowerCase()
-          for (let i = 0; i < count; i++) {
+          for (let i = 0; i < credCount; i++) {
             const cred = await publicClient.readContract({
               address: CONTRACT_ADDRESS,
               abi: ABI,
@@ -832,6 +1009,8 @@ export default function Dashboard() {
         }
       } catch {
         // If pre-check fails, still allow tx — contract may revert
+      } finally {
+        setIsPreChecking(false)
       }
     }
 
@@ -1002,8 +1181,8 @@ export default function Dashboard() {
     overview: 'Snapshot of your on-chain activity.',
     events: 'Browse and act on published events.',
     create: 'Publish a new event to BOT Chain.',
-    attend: 'Check in to an event with your wallet.',
-    issue: 'Mint a credential to an attendee.',
+    attend: 'Free check-in — sign a message, no gas.',
+    issue: 'Mint a credential on-chain (uses gas).',
     verify: 'Confirm a credential by ID.',
   }[view]
 
@@ -1154,13 +1333,13 @@ export default function Dashboard() {
                             id: 'attend',
                             icon: UserCheck,
                             title: 'Attend event',
-                            desc: 'Check in with your wallet',
+                            desc: 'Free check-in · no gas',
                           },
                           {
                             id: 'issue',
                             icon: BadgeCheck,
                             title: 'Issue credential',
-                            desc: 'Mint to an attendee address',
+                            desc: 'On-chain mint · uses gas',
                           },
                           {
                             id: 'verify',
@@ -1381,22 +1560,48 @@ export default function Dashboard() {
                                       className="overflow-hidden border-t border-border"
                                     >
                                       <div className="flex flex-wrap gap-2 bg-muted p-4">
-                                        <button
-                                          type="button"
-                                          className="btn btn-primary h-9 text-xs"
-                                          onClick={() => selectEventForAttend(ev)}
-                                        >
-                                          <UserCheck className="h-3.5 w-3.5" aria-hidden />
-                                          Attend
-                                        </button>
-                                        <button
-                                          type="button"
-                                          className="btn btn-outline h-9 text-xs"
-                                          onClick={() => selectEventForIssue(ev)}
-                                        >
-                                          <BadgeCheck className="h-3.5 w-3.5" aria-hidden />
-                                          Issue credential
-                                        </button>
+                                        {(() => {
+                                          const isMine =
+                                            address &&
+                                            ev.organizer &&
+                                            sameAddress(address, ev.organizer)
+                                          return (
+                                            <>
+                                              {!isMine && (
+                                                <button
+                                                  type="button"
+                                                  className="btn btn-primary h-9 text-xs"
+                                                  onClick={() => selectEventForAttend(ev)}
+                                                >
+                                                  <UserCheck
+                                                    className="h-3.5 w-3.5"
+                                                    aria-hidden
+                                                  />
+                                                  Attend
+                                                </button>
+                                              )}
+                                              {isMine && (
+                                                <button
+                                                  type="button"
+                                                  className="btn btn-primary h-9 text-xs"
+                                                  onClick={() => selectEventForIssue(ev)}
+                                                >
+                                                  <BadgeCheck
+                                                    className="h-3.5 w-3.5"
+                                                    aria-hidden
+                                                  />
+                                                  Issue credential
+                                                </button>
+                                              )}
+                                              {isMine && (
+                                                <p className="w-full text-[11px] text-muted-foreground">
+                                                  You are the organizer — others check in free
+                                                  (no gas); you issue credentials (uses gas).
+                                                </p>
+                                              )}
+                                            </>
+                                          )
+                                        })()}
                                         {ev.metadata && (
                                           <p className="w-full break-all font-mono text-[11px] text-muted-foreground">
                                             {ev.metadata}
@@ -1486,15 +1691,23 @@ export default function Dashboard() {
                   </div>
                 )}
 
-                {/* ── Attend ── */}
+                {/* ── Attend (gasless) ── */}
                 {view === 'attend' && (
                   <div className="mx-auto max-w-lg space-y-6">
                     <div>
                       <h2 className="text-2xl font-semibold tracking-tight">Attend</h2>
                       <p className="mt-1 text-sm text-muted-foreground">
-                        Check in to an event with one transaction. This does not create a
-                        credential yet — the organizer issues that next.
+                        Free check-in: sign a message in your wallet.{' '}
+                        <span className="font-medium text-foreground">No gas</span> — this
+                        is not a blockchain transaction. Organizers pay gas only when they
+                        issue credentials.
                       </p>
+                    </div>
+                    <div className="rounded-md border border-border bg-muted px-3 py-2.5 text-xs text-muted-foreground">
+                      <span className="font-medium text-foreground">Gas free:</span> Attend
+                      uses a signature only. On-chain gas is only for{' '}
+                      <span className="text-foreground">Create event</span> and{' '}
+                      <span className="text-foreground">Issue credential</span>.
                     </div>
                     <form className="card space-y-4 p-5" onSubmit={handleAttend}>
                       {selectedEvent && (
@@ -1519,24 +1732,84 @@ export default function Dashboard() {
                           className="input font-mono"
                           placeholder="0"
                           value={attendEventId}
-                          onChange={(e) => setAttendEventId(e.target.value)}
+                          onChange={(e) => {
+                            setAttendEventId(e.target.value)
+                            setFieldError('')
+                          }}
                           required
                         />
                       </div>
+                      {isOrganizerOfAttendEvent && (
+                        <div
+                          role="status"
+                          className="flex items-start gap-2 rounded-md border border-border bg-muted px-3 py-2.5 text-sm"
+                        >
+                          <XCircle
+                            className="mt-0.5 h-4 w-4 shrink-0 text-destructive"
+                            aria-hidden
+                          />
+                          <p className="leading-relaxed text-muted-foreground">
+                            <span className="font-medium text-foreground">
+                              You are the organizer.
+                            </span>{' '}
+                            Share Event ID #{String(attendEventId)} so others can check in
+                            free. Then use <span className="text-foreground">Issue</span>{' '}
+                            to mint their credentials (you pay gas for issue).
+                          </p>
+                        </div>
+                      )}
+                      {!isOrganizerOfAttendEvent &&
+                        alreadyAttended &&
+                        attendIdParsed !== null && (
+                        <div
+                          role="status"
+                          className="flex items-start gap-2 rounded-md border border-border bg-muted px-3 py-2.5 text-sm"
+                        >
+                          <CheckCircle2
+                            className="mt-0.5 h-4 w-4 shrink-0 text-success"
+                            aria-hidden
+                          />
+                          <div className="min-w-0 flex-1 space-y-1">
+                            <p className="leading-relaxed text-muted-foreground">
+                              <span className="font-medium text-foreground">
+                                Already checked in (free).
+                              </span>{' '}
+                              Share this address with the organizer so they can issue your
+                              credential:
+                            </p>
+                            <p className="break-all font-mono text-xs text-foreground">
+                              {address}
+                            </p>
+                          </div>
+                        </div>
+                      )}
                       <div className="flex flex-wrap gap-2">
                         <button
                           type="submit"
                           className="btn btn-primary flex-1"
-                          disabled={busy}
-                          aria-busy={busy}
+                          disabled={
+                            busy ||
+                            alreadyAttended ||
+                            isOrganizerOfAttendEvent
+                          }
+                          aria-busy={isPreChecking || isSigning}
                         >
-                          {busy ? (
+                          {isPreChecking ? (
                             <>
                               <Loader2 className="h-4 w-4 animate-spin" aria-hidden />
-                              Submitting…
+                              Checking…
                             </>
+                          ) : isSigning ? (
+                            <>
+                              <Loader2 className="h-4 w-4 animate-spin" aria-hidden />
+                              Sign in wallet…
+                            </>
+                          ) : isOrganizerOfAttendEvent ? (
+                            'Organizers cannot attend'
+                          ) : alreadyAttended ? (
+                            'Already checked in'
                           ) : (
-                            'Attend event'
+                            'Check in free · no gas'
                           )}
                         </button>
                         <button
@@ -1559,13 +1832,15 @@ export default function Dashboard() {
                         Issue credential
                       </h2>
                       <p className="mt-1 text-sm text-muted-foreground">
-                        Mint a credential to someone who already attended.
-                        After success, a <strong className="font-medium text-foreground">Credential ID</strong> appears here for verification.
+                        On-chain mint to an attendee wallet (uses gas). Check-in for them
+                        is free; this step writes the credential to BOT Chain.
+                        After success, a <strong className="font-medium text-foreground">Credential ID</strong> appears for verification.
                       </p>
                     </div>
                     <div className="rounded-md border border-border bg-muted px-3 py-2.5 text-xs text-muted-foreground">
-                      Requirements: you must be the <span className="text-foreground">event organizer</span>,
-                      and the recipient must have <span className="text-foreground">Attended</span> first.
+                      Requirements: you must be the{' '}
+                      <span className="text-foreground">event organizer</span>, enter the
+                      attendee&apos;s wallet (not yours), and this transaction uses gas.
                     </div>
                     <form className="card space-y-4 p-5" onSubmit={handleIssue}>
                       {selectedEvent && (
@@ -1595,30 +1870,23 @@ export default function Dashboard() {
                         />
                       </div>
                       <div>
-                        <div className="mb-1.5 flex items-center justify-between gap-2">
-                          <label htmlFor="issue-recipient" className="label mb-0">
-                            Recipient address
-                          </label>
-                          {address && (
-                            <button
-                              type="button"
-                              className="text-xs font-medium text-muted-foreground underline-offset-2 hover:text-foreground hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring rounded-sm"
-                              onClick={() => setIssueRecipient(address)}
-                            >
-                              Use my wallet
-                            </button>
-                          )}
-                        </div>
+                        <label htmlFor="issue-recipient" className="label">
+                          Recipient address (attendee)
+                        </label>
                         <input
                           id="issue-recipient"
                           className="input font-mono text-xs"
-                          placeholder="0x…"
+                          placeholder="0x… wallet that attended"
                           value={issueRecipient}
                           onChange={(e) => setIssueRecipient(e.target.value)}
                           autoComplete="off"
                           spellCheck={false}
                           required
                         />
+                        <p className="mt-1.5 text-xs text-muted-foreground">
+                          Paste the attendee&apos;s wallet (they check in free). Not your
+                          own organizer address.
+                        </p>
                       </div>
                       <div className="flex flex-wrap gap-2">
                         <button

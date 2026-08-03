@@ -1,6 +1,16 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
+/**
+ * Credence — verifiable event credentials on BOT Chain.
+ *
+ * Gas model:
+ *   - createEvent      → on-chain (organizer pays gas)
+ *   - issueCredential  → on-chain (organizer pays gas)
+ *   - Attendance       → off-chain free check-in (wallet signature only).
+ *     The frontend records a signed message; organizers issue to attendee
+ *     addresses. Issuing also records the recipient as an attendee on-chain.
+ */
 contract Credence {
     struct Event {
         uint256 id;
@@ -22,6 +32,7 @@ contract Credence {
     Event[] public events;
     Credential[] public credentials;
 
+    /// eventId => wallet => recognized for this event (set when credential is issued)
     mapping(uint256 => mapping(address => bool)) public attendance;
     /// eventId => recipient => already issued (prevents double credentials)
     mapping(uint256 => mapping(address => bool)) public hasCredential;
@@ -29,7 +40,6 @@ contract Credence {
     mapping(uint256 => address[]) private eventAttendees;
 
     event EventCreated(uint256 indexed eventId, string name, address organizer);
-    event Attended(uint256 indexed eventId, address indexed attendee);
     event CredentialIssued(uint256 indexed credentialId, uint256 indexed eventId, address recipient);
 
     modifier onlyOrganizer(uint256 eventId) {
@@ -55,23 +65,26 @@ contract Credence {
         emit EventCreated(id, name, msg.sender);
     }
 
-    function attend(uint256 eventId) external eventExists(eventId) {
-        require(events[eventId].isActive, "Event not active");
-        require(!attendance[eventId][msg.sender], "Already attended");
-
-        attendance[eventId][msg.sender] = true;
-        eventAttendees[eventId].push(msg.sender);
-
-        emit Attended(eventId, msg.sender);
-    }
-
+    /**
+     * Issue a credential to an attendee. Only the event organizer may call this.
+     * Check-in itself is free/off-chain (signed message in the app); this is the
+     * on-chain step that mints the verifiable credential (costs gas).
+     */
     function issueCredential(uint256 eventId, address recipient) external
         eventExists(eventId)
         onlyOrganizer(eventId)
     {
         require(events[eventId].isActive, "Event not active");
-        require(attendance[eventId][recipient], "Recipient did not attend");
+        // Credential goes to attendees, not to the organizer themselves
+        require(recipient != msg.sender, "Cannot issue to yourself");
+        require(recipient != events[eventId].organizer, "Cannot issue to organizer");
         require(!hasCredential[eventId][recipient], "Already issued");
+
+        // Record recipient as recognized for this event (audit trail)
+        if (!attendance[eventId][recipient]) {
+            attendance[eventId][recipient] = true;
+            eventAttendees[eventId].push(recipient);
+        }
 
         uint256 credId = credentials.length;
         credentials.push(Credential({
