@@ -336,7 +336,7 @@ function CertificateMockup({ reduceMotion, visible }) {
                 <span className="text-xs font-medium tracking-tight">BOT Chain</span>
               </div>
               <a
-                href="https://scan.bohr.life/address/0x1b5c75806a5Ac1fa1428D9df45D79DD4d769f6b6"
+                href="0xb73E31CA3eAD386661dcf92A7Fb461e02aC1518C"
                 target="_blank"
                 rel="noopener noreferrer"
                 className="inline-flex items-center gap-1 rounded-sm text-xs font-medium text-white/80 transition-colors duration-100 hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/40"
