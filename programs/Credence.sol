@@ -2,111 +2,148 @@
 pragma solidity ^0.8.20;
 
 /**
- * Credence — verifiable event credentials on BOT Chain.
+ * Credence — gas-efficient verifiable credentials on BOT Chain.
  *
- * Gas model:
- *   - createEvent      → on-chain (organizer pays gas)
- *   - issueCredential  → on-chain (organizer pays gas)
- *   - Attendance       → off-chain free check-in (wallet signature only).
- *     The frontend records a signed message; organizers issue to attendee
- *     addresses. Issuing also records the recipient as an attendee on-chain.
+ * Flow:
+ *   1. Organizer  createEvent        (pays gas)
+ *   2. Attendee   attend             (pays small gas — 1 mapping write)
+ *   3. Organizer  issueCredential    (pays gas — only if recipient attended)
+ *   4. Anyone     verifyCredential   (view, free)
+ *
+ * Gas design choices:
+ *   - Custom errors (no expensive revert strings)
+ *   - calldata for string inputs
+ *   - Packed Event / Credential structs
+ *   - Single status mapping (attended / issued) instead of two bool maps + arrays
+ *   - No attendee/credential index arrays (array push is costly)
+ *   - No redundant id fields (use array index)
+ *   - Lean events (indexed ids/addresses only)
  */
 contract Credence {
+    // ── Custom errors (cheaper than require("string")) ──────────────────────
+    error EventMissing();
+    error NotOrganizer();
+    error EventInactive();
+    error OrganizerCannotAttend();
+    error AlreadyAttended();
+    error NotAttended();
+    error AlreadyIssued();
+    error BadRecipient();
+    error CredentialMissing();
+
+    // status: 0 = none, 1 = attended, 2 = issued
+    uint8 private constant STATUS_NONE = 0;
+    uint8 private constant STATUS_ATTENDED = 1;
+    uint8 private constant STATUS_ISSUED = 2;
+
+    /**
+     * Packed: organizer (20) + date (8) + isActive (1) share slot 0.
+     * name / metadata each use dynamic slots (unavoidable for strings).
+     * No `id` field — use the array index.
+     */
     struct Event {
-        uint256 id;
-        string name;
-        uint256 date;
-        string metadata;
         address organizer;
+        uint64 date;
         bool isActive;
+        string name;
+        string metadata;
     }
 
+    /**
+     * Packed into two slots:
+     *   slot0: recipient (20) + eventId (8) + 4 bytes free
+     *   slot1: issuedAt (8)
+     * No `id` / `isValid` — id is array index; all stored creds are valid.
+     */
     struct Credential {
-        uint256 id;
-        uint256 eventId;
         address recipient;
-        uint256 issuedAt;
-        bool isValid;
+        uint64 eventId;
+        uint64 issuedAt;
     }
 
     Event[] public events;
     Credential[] public credentials;
 
-    /// eventId => wallet => recognized for this event (set when credential is issued)
-    mapping(uint256 => mapping(address => bool)) public attendance;
-    /// eventId => recipient => already issued (prevents double credentials)
-    mapping(uint256 => mapping(address => bool)) public hasCredential;
-    mapping(uint256 => uint256[]) public eventCredentials;
-    mapping(uint256 => address[]) private eventAttendees;
+    /// eventId => wallet => STATUS_*
+    mapping(uint256 => mapping(address => uint8)) public status;
 
-    event EventCreated(uint256 indexed eventId, string name, address organizer);
-    event CredentialIssued(uint256 indexed credentialId, uint256 indexed eventId, address recipient);
+    event EventCreated(uint256 indexed eventId, address indexed organizer);
+    event Attended(uint256 indexed eventId, address indexed attendee);
+    event CredentialIssued(
+        uint256 indexed credentialId,
+        uint256 indexed eventId,
+        address indexed recipient
+    );
 
-    modifier onlyOrganizer(uint256 eventId) {
-        require(events[eventId].organizer == msg.sender, "Not organizer");
-        _;
-    }
+    // ── Writes ──────────────────────────────────────────────────────────────
 
-    modifier eventExists(uint256 eventId) {
-        require(eventId < events.length, "Event does not exist");
-        _;
-    }
-
-    function createEvent(string memory name, uint256 date, string memory metadata) external {
+    /// @notice Create an event. Caller becomes the organizer.
+    function createEvent(
+        string calldata name,
+        uint64 date,
+        string calldata metadata
+    ) external {
         uint256 id = events.length;
-        events.push(Event({
-            id: id,
-            name: name,
-            date: date,
-            metadata: metadata,
-            organizer: msg.sender,
-            isActive: true
-        }));
-        emit EventCreated(id, name, msg.sender);
+        events.push(
+            Event({
+                organizer: msg.sender,
+                date: date,
+                isActive: true,
+                name: name,
+                metadata: metadata
+            })
+        );
+        emit EventCreated(id, msg.sender);
     }
 
-    /**
-     * Issue a credential to an attendee. Only the event organizer may call this.
-     * Check-in itself is free/off-chain (signed message in the app); this is the
-     * on-chain step that mints the verifiable credential (costs gas).
-     */
-    function issueCredential(uint256 eventId, address recipient) external
-        eventExists(eventId)
-        onlyOrganizer(eventId)
-    {
-        require(events[eventId].isActive, "Event not active");
-        // Credential goes to attendees, not to the organizer themselves
-        require(recipient != msg.sender, "Cannot issue to yourself");
-        require(recipient != events[eventId].organizer, "Cannot issue to organizer");
-        require(!hasCredential[eventId][recipient], "Already issued");
+    /// @notice Check in to an event. Organizer cannot attend their own event.
+    /// @dev One cold SSTORE on first check-in — intentionally minimal.
+    function attend(uint256 eventId) external {
+        if (eventId >= events.length) revert EventMissing();
 
-        // Record recipient as recognized for this event (audit trail)
-        if (!attendance[eventId][recipient]) {
-            attendance[eventId][recipient] = true;
-            eventAttendees[eventId].push(recipient);
-        }
+        Event storage ev = events[eventId];
+        if (!ev.isActive) revert EventInactive();
+        if (ev.organizer == msg.sender) revert OrganizerCannotAttend();
+
+        uint8 s = status[eventId][msg.sender];
+        if (s != STATUS_NONE) revert AlreadyAttended();
+
+        status[eventId][msg.sender] = STATUS_ATTENDED;
+        emit Attended(eventId, msg.sender);
+    }
+
+    /// @notice Organizer mints a credential to a wallet that already attended.
+    function issueCredential(uint256 eventId, address recipient) external {
+        if (eventId >= events.length) revert EventMissing();
+
+        Event storage ev = events[eventId];
+        if (ev.organizer != msg.sender) revert NotOrganizer();
+        if (!ev.isActive) revert EventInactive();
+        if (recipient == address(0) || recipient == msg.sender) revert BadRecipient();
+
+        uint8 s = status[eventId][recipient];
+        if (s == STATUS_NONE) revert NotAttended();
+        if (s == STATUS_ISSUED) revert AlreadyIssued();
+
+        // s == STATUS_ATTENDED
+        status[eventId][recipient] = STATUS_ISSUED;
 
         uint256 credId = credentials.length;
-        credentials.push(Credential({
-            id: credId,
-            eventId: eventId,
-            recipient: recipient,
-            issuedAt: block.timestamp,
-            isValid: true
-        }));
-
-        hasCredential[eventId][recipient] = true;
-        eventCredentials[eventId].push(credId);
+        credentials.push(
+            Credential({
+                recipient: recipient,
+                eventId: uint64(eventId),
+                issuedAt: uint64(block.timestamp)
+            })
+        );
         emit CredentialIssued(credId, eventId, recipient);
     }
 
-    function verifyCredential(uint256 credentialId) external view returns (bool) {
-        require(credentialId < credentials.length, "Credential does not exist");
-        return credentials[credentialId].isValid;
-    }
+    // ── Views ───────────────────────────────────────────────────────────────
 
-    function getAttendees(uint256 eventId) external view eventExists(eventId) returns (address[] memory) {
-        return eventAttendees[eventId];
+    function verifyCredential(uint256 credentialId) external view returns (bool) {
+        if (credentialId >= credentials.length) revert CredentialMissing();
+        return true; // every stored credential is valid
     }
 
     function getEventCount() external view returns (uint256) {
@@ -115,5 +152,15 @@ contract Credence {
 
     function getCredentialCount() external view returns (uint256) {
         return credentials.length;
+    }
+
+    /// @notice True if wallet checked in (attended or already issued).
+    function attendance(uint256 eventId, address wallet) external view returns (bool) {
+        return status[eventId][wallet] >= STATUS_ATTENDED;
+    }
+
+    /// @notice True if a credential was already issued to wallet for this event.
+    function hasCredential(uint256 eventId, address wallet) external view returns (bool) {
+        return status[eventId][wallet] == STATUS_ISSUED;
     }
 }
