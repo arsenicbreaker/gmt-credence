@@ -8,7 +8,6 @@ import {
   useReadContract,
   useWaitForTransactionReceipt,
   usePublicClient,
-  useSignMessage,
 } from 'wagmi'
 import { parseEventLogs } from 'viem'
 import {
@@ -28,16 +27,33 @@ import {
   XCircle,
 } from 'lucide-react'
 
-const CONTRACT_ADDRESS = '0xa52A5686fC9bf0Ba33E0501D7f775E09f8a76cD7'
+const CONTRACT_ADDRESS = '0x360199E70FC97331C6404E9074f1Ff67f1da887A'
 
 const ABI = [
+  // ── Custom errors (for friendly revert decoding) ──
+  { type: 'error', name: 'EventMissing', inputs: [] },
+  { type: 'error', name: 'NotOrganizer', inputs: [] },
+  { type: 'error', name: 'EventInactive', inputs: [] },
+  { type: 'error', name: 'OrganizerCannotAttend', inputs: [] },
+  { type: 'error', name: 'AlreadyAttended', inputs: [] },
+  { type: 'error', name: 'NotAttended', inputs: [] },
+  { type: 'error', name: 'AlreadyIssued', inputs: [] },
+  { type: 'error', name: 'BadRecipient', inputs: [] },
+  { type: 'error', name: 'CredentialMissing', inputs: [] },
   {
     inputs: [
       { name: 'name', type: 'string' },
-      { name: 'date', type: 'uint256' },
+      { name: 'date', type: 'uint64' },
       { name: 'metadata', type: 'string' },
     ],
     name: 'createEvent',
+    outputs: [],
+    stateMutability: 'nonpayable',
+    type: 'function',
+  },
+  {
+    inputs: [{ name: 'eventId', type: 'uint256' }],
+    name: 'attend',
     outputs: [],
     stateMutability: 'nonpayable',
     type: 'function',
@@ -73,30 +89,49 @@ const ABI = [
     stateMutability: 'view',
     type: 'function',
   },
+  // Packed Event: (organizer, date, isActive, name, metadata)
   {
     inputs: [{ name: '', type: 'uint256' }],
     name: 'events',
     outputs: [
-      { name: 'id', type: 'uint256' },
-      { name: 'name', type: 'string' },
-      { name: 'date', type: 'uint256' },
-      { name: 'metadata', type: 'string' },
       { name: 'organizer', type: 'address' },
+      { name: 'date', type: 'uint64' },
       { name: 'isActive', type: 'bool' },
+      { name: 'name', type: 'string' },
+      { name: 'metadata', type: 'string' },
+    ],
+    stateMutability: 'view',
+    type: 'function',
+  },
+  // Packed Credential: (recipient, eventId, issuedAt)
+  {
+    inputs: [{ name: '', type: 'uint256' }],
+    name: 'credentials',
+    outputs: [
+      { name: 'recipient', type: 'address' },
+      { name: 'eventId', type: 'uint64' },
+      { name: 'issuedAt', type: 'uint64' },
     ],
     stateMutability: 'view',
     type: 'function',
   },
   {
-    inputs: [{ name: '', type: 'uint256' }],
-    name: 'credentials',
-    outputs: [
-      { name: 'id', type: 'uint256' },
+    inputs: [
       { name: 'eventId', type: 'uint256' },
-      { name: 'recipient', type: 'address' },
-      { name: 'issuedAt', type: 'uint256' },
-      { name: 'isValid', type: 'bool' },
+      { name: 'wallet', type: 'address' },
     ],
+    name: 'attendance',
+    outputs: [{ name: '', type: 'bool' }],
+    stateMutability: 'view',
+    type: 'function',
+  },
+  {
+    inputs: [
+      { name: 'eventId', type: 'uint256' },
+      { name: 'wallet', type: 'address' },
+    ],
+    name: 'hasCredential',
+    outputs: [{ name: '', type: 'bool' }],
     stateMutability: 'view',
     type: 'function',
   },
@@ -105,8 +140,15 @@ const ABI = [
     name: 'EventCreated',
     inputs: [
       { name: 'eventId', type: 'uint256', indexed: true },
-      { name: 'name', type: 'string', indexed: false },
-      { name: 'organizer', type: 'address', indexed: false },
+      { name: 'organizer', type: 'address', indexed: true },
+    ],
+  },
+  {
+    type: 'event',
+    name: 'Attended',
+    inputs: [
+      { name: 'eventId', type: 'uint256', indexed: true },
+      { name: 'attendee', type: 'address', indexed: true },
     ],
   },
   {
@@ -115,18 +157,8 @@ const ABI = [
     inputs: [
       { name: 'credentialId', type: 'uint256', indexed: true },
       { name: 'eventId', type: 'uint256', indexed: true },
-      { name: 'recipient', type: 'address', indexed: false },
+      { name: 'recipient', type: 'address', indexed: true },
     ],
-  },
-  {
-    inputs: [
-      { name: '', type: 'uint256' },
-      { name: '', type: 'address' },
-    ],
-    name: 'hasCredential',
-    outputs: [{ name: '', type: 'bool' }],
-    stateMutability: 'view',
-    type: 'function',
   },
 ]
 
@@ -169,45 +201,37 @@ function sameAddress(a, b) {
   return String(a).toLowerCase() === String(b).toLowerCase()
 }
 
-/** Gasless check-in storage (signed message — no chain tx, no gas). */
-const CHECKIN_STORAGE_KEY = 'credence:checkins'
-
-function buildCheckInMessage(eventId, attendee) {
-  return [
-    'Credence free check-in',
-    `Event ID: ${eventId}`,
-    `Attendee: ${attendee}`,
-    'Network: BOT Chain',
-    'This is not a transaction and costs no gas.',
-  ].join('\n')
-}
-
-function readCheckIns() {
-  try {
-    const raw = localStorage.getItem(CHECKIN_STORAGE_KEY)
-    if (!raw) return {}
-    const parsed = JSON.parse(raw)
-    return parsed && typeof parsed === 'object' ? parsed : {}
-  } catch {
-    return {}
+/** Map custom errors / revert text → plain language */
+function friendlyRevert(msg) {
+  if (!msg) return 'Transaction failed'
+  if (/NotOrganizer|Not organizer/i.test(msg)) {
+    return 'Only the event organizer can issue credentials for this event.'
   }
-}
-
-function getLocalCheckIn(eventId, attendee) {
-  if (eventId === '' || eventId === null || !attendee) return null
-  const all = readCheckIns()
-  const byEvent = all[String(eventId)]
-  if (!byEvent) return null
-  return byEvent[String(attendee).toLowerCase()] || null
-}
-
-function saveLocalCheckIn(eventId, attendee, payload) {
-  const all = readCheckIns()
-  const key = String(eventId)
-  const addr = String(attendee).toLowerCase()
-  if (!all[key]) all[key] = {}
-  all[key][addr] = payload
-  localStorage.setItem(CHECKIN_STORAGE_KEY, JSON.stringify(all))
+  if (/OrganizerCannotAttend/i.test(msg)) {
+    return 'You created this event — organizers cannot attend. Share the Event ID so others can check in.'
+  }
+  if (/AlreadyAttended|Already attended/i.test(msg)) {
+    return 'This wallet already attended this event.'
+  }
+  if (/NotAttended|did not attend|Not attended/i.test(msg)) {
+    return 'Recipient has not attended this event yet. They must Attend first.'
+  }
+  if (/AlreadyIssued|Already issued/i.test(msg)) {
+    return 'A credential was already issued to this address for this event. One per attendee.'
+  }
+  if (/BadRecipient|Cannot issue to yourself|Cannot issue to organizer/i.test(msg)) {
+    return 'Invalid recipient. Use an attendee wallet — not the organizer.'
+  }
+  if (/EventInactive|Event not active/i.test(msg)) {
+    return 'This event is not active.'
+  }
+  if (/EventMissing|Event does not exist/i.test(msg)) {
+    return 'Event ID not found. Check the ID and try again.'
+  }
+  if (/CredentialMissing/i.test(msg)) {
+    return 'Credential ID not found.'
+  }
+  return msg
 }
 
 function formatDate(ts) {
@@ -463,12 +487,6 @@ export default function Dashboard() {
 
   const { writeContract, data: hash, error, isPending, reset } = useWriteContract()
   const {
-    signMessageAsync,
-    isPending: isSigning,
-    error: signError,
-    reset: resetSign,
-  } = useSignMessage()
-  const {
     data: receipt,
     isLoading: isConfirming,
     isSuccess,
@@ -493,14 +511,12 @@ export default function Dashboard() {
   const [txStatus, setTxStatus] = useState('')
   const [fieldError, setFieldError] = useState('')
   const [isLoadingEvents, setIsLoadingEvents] = useState(false)
-  /** 'create' | 'issue' | null — attend is gasless (no tx) */
+  /** 'create' | 'attend' | 'issue' | null */
   const [pendingAction, setPendingAction] = useState(null)
   const [lastResult, setLastResult] = useState(null)
   const [copied, setCopied] = useState(false)
   /** True while reading chain before wallet prompt */
   const [isPreChecking, setIsPreChecking] = useState(false)
-  /** Bumps when local gasless check-in is saved */
-  const [checkInVersion, setCheckInVersion] = useState(0)
   const handledHash = useRef(null)
 
   const connector = connectors[0]
@@ -544,18 +560,25 @@ export default function Dashboard() {
     functionName: 'getCredentialCount',
   })
 
-  // Gasless check-in is stored locally after a free wallet signature (no gas).
+  // Live on-chain check: already attended? (avoids a doomed wallet prompt)
   const attendIdParsed =
     attendEventId !== '' && attendEventId !== null && !Number.isNaN(Number(attendEventId))
       ? BigInt(attendEventId)
       : null
-  // checkInVersion forces re-read from localStorage after a successful sign
-  const alreadyAttended = Boolean(
-    checkInVersion >= 0 &&
-      address &&
-      attendIdParsed !== null &&
-      getLocalCheckIn(Number(attendEventId), address)
-  )
+  const {
+    data: alreadyAttended,
+    isFetching: isCheckingAttendance,
+    refetch: refetchAttendance,
+  } = useReadContract({
+    address: CONTRACT_ADDRESS,
+    abi: ABI,
+    functionName: 'attendance',
+    args:
+      address && attendIdParsed !== null ? [attendIdParsed, address] : undefined,
+    query: {
+      enabled: Boolean(address && attendIdParsed !== null && view === 'attend'),
+    },
+  })
 
   useEffect(() => {
     let cancelled = false
@@ -581,13 +604,14 @@ export default function Dashboard() {
             functionName: 'events',
             args: [BigInt(i)],
           })
+          // Packed Event: [organizer, date, isActive, name, metadata]
           evs.push({
             id: i,
-            name: result[1],
-            date: result[2],
-            metadata: result[3],
-            organizer: result[4],
-            isActive: result[5],
+            organizer: result[0],
+            date: result[1],
+            isActive: result[2],
+            name: result[3],
+            metadata: result[4],
           })
         } catch {
           evs.push({
@@ -613,40 +637,21 @@ export default function Dashboard() {
   }, [eventCount, publicClient])
 
   useEffect(() => {
-    if (isSigning) setTxStatus('Sign the free check-in in your wallet (no gas)…')
-    else if (isPending) setTxStatus('Confirm in your wallet…')
+    if (isPending) setTxStatus('Confirm in your wallet…')
     else if (isConfirming) setTxStatus('Waiting for confirmation…')
-    else if (error || signError) {
-      const err = error || signError
-      const msg = err.shortMessage || err.message || 'Request failed'
+    else if (error) {
+      const msg = error.shortMessage || error.message || 'Transaction failed'
       if (/user rejected|denied|rejected the request/i.test(msg)) {
         setTxStatus('')
         setPendingAction(null)
         reset()
-        resetSign()
       } else {
-        // Surface common revert reasons in plain language
-        let friendly = msg
-        if (/Not organizer/i.test(msg)) {
-          friendly =
-            'Only the event organizer can issue credentials for this event.'
-        } else if (/Cannot issue to yourself|Cannot issue to organizer/i.test(msg)) {
-          friendly =
-            'You cannot issue a credential to yourself. Enter an attendee wallet address.'
-        } else if (/Event not active/i.test(msg)) {
-          friendly = 'This event is not active.'
-        } else if (/Event does not exist/i.test(msg)) {
-          friendly = 'Event ID not found. Check the ID and try again.'
-        } else if (/Already issued/i.test(msg)) {
-          friendly =
-            'A credential was already issued to this address for this event. One credential per attendee.'
-        }
-        setTxStatus(friendly)
+        setTxStatus(friendlyRevert(msg))
         setFieldError('')
         setPendingAction(null)
       }
     }
-  }, [isPending, isConfirming, isSigning, error, signError, reset, resetSign])
+  }, [isPending, isConfirming, error, reset])
 
   // Parse logs on confirmed receipt → surface Event ID / Credential ID
   useEffect(() => {
@@ -693,12 +698,30 @@ export default function Dashboard() {
         setLastResult({
           title: 'Event created',
           detail:
-            'Share this Event ID so participants can check in for free (no gas).',
+            'Share this Event ID so participants can Attend. Then you can Issue credentials.',
           eventId: eventId ?? 0,
         })
         setEventName('')
         setEventDate('')
         setEventMetadata('')
+        return
+      }
+
+      if (action === 'attend') {
+        const attended = logs.find((l) => l.eventName === 'Attended')
+        const eventId =
+          attended?.args?.eventId !== undefined
+            ? Number(attended.args.eventId)
+            : attendEventId !== ''
+              ? Number(attendEventId)
+              : null
+        setLastResult({
+          title: 'Attendance recorded',
+          detail:
+            'Checked in on-chain. Share your wallet address with the organizer so they can issue your credential.',
+          eventId,
+        })
+        refetchAttendance()
         return
       }
 
@@ -753,7 +776,9 @@ export default function Dashboard() {
     refetchCount,
     refetchCredCount,
     publicClient,
+    attendEventId,
     issueEventId,
+    refetchAttendance,
   ])
 
   // Esc closes mobile sidebar
@@ -765,7 +790,7 @@ export default function Dashboard() {
     return () => window.removeEventListener('keydown', onKey)
   }, [])
 
-  const busy = isPending || isConfirming || isPreChecking || isSigning
+  const busy = isPending || isConfirming || isPreChecking
   const count = Number(eventCount ?? 0)
   const activeCount = events.filter((e) => e.isActive).length
   const currentNav = NAV.find((n) => n.id === view)
@@ -802,6 +827,7 @@ export default function Dashboard() {
       address: CONTRACT_ADDRESS,
       abi: ABI,
       functionName: 'createEvent',
+      // date is uint64 in the optimized contract
       args: [eventName.trim(), BigInt(timestamp), eventMetadata.trim() || ''],
     })
   }
@@ -821,22 +847,11 @@ export default function Dashboard() {
       return
     }
 
-    const eventIdNum = Number(attendEventId)
     const eventId = BigInt(attendEventId)
 
-    // Already checked in locally (gasless)
-    if (getLocalCheckIn(eventIdNum, address)) {
-      setFieldError(
-        'This wallet already checked in to this event (free check-in on this device).'
-      )
-      setCheckInVersion((v) => v + 1)
-      return
-    }
-
-    // Read-only RPC checks — no write tx, no gas
+    // Pre-check on-chain before wallet — avoid failed txs in history
     setIsPreChecking(true)
     setFieldError('')
-    setTxStatus('')
     try {
       const total = await publicClient.readContract({
         address: CONTRACT_ADDRESS,
@@ -854,58 +869,44 @@ export default function Dashboard() {
         functionName: 'events',
         args: [eventId],
       })
-      // events(): [id, name, date, metadata, organizer, isActive]
-      if (ev[5] !== true) {
+      // [organizer, date, isActive, name, metadata]
+      if (ev[2] !== true) {
         setFieldError('This event is not active.')
         return
       }
-
-      // Organizer hosts — only other wallets may check in
-      if (sameAddress(ev[4], address)) {
+      if (sameAddress(ev[0], address)) {
         setFieldError(
-          'You created this event — organizers cannot check in to their own event. Share the Event ID so others can check in free.'
+          'You created this event — organizers cannot attend. Share the Event ID so others can check in.'
         )
         return
       }
+
+      const hasAttended = await publicClient.readContract({
+        address: CONTRACT_ADDRESS,
+        abi: ABI,
+        functionName: 'attendance',
+        args: [eventId, address],
+      })
+      if (hasAttended) {
+        setFieldError('This wallet already attended this event.')
+        refetchAttendance()
+        return
+      }
     } catch {
-      setFieldError('Could not load this event. Check the network and try again.')
-      return
+      // RPC blip — still allow tx; contract may revert
     } finally {
       setIsPreChecking(false)
     }
 
-    // Free wallet signature only — not a transaction, costs no gas
+    setFieldError('')
     setLastResult(null)
-    setTxStatus('Sign the free check-in in your wallet (no gas)…')
-    const message = buildCheckInMessage(eventIdNum, address)
-    try {
-      const signature = await signMessageAsync({ message })
-      saveLocalCheckIn(eventIdNum, address, {
-        signature,
-        message,
-        signedAt: Date.now(),
-        attendee: address,
-        eventId: eventIdNum,
-      })
-      setCheckInVersion((v) => v + 1)
-      setTxStatus('')
-      setFieldError('')
-      setLastResult({
-        title: 'Checked in — free',
-        detail:
-          'No gas used. Share your wallet address with the organizer so they can issue your credential on-chain.',
-        eventId: eventIdNum,
-      })
-    } catch (err) {
-      const msg = err?.shortMessage || err?.message || ''
-      if (/user rejected|denied|rejected the request/i.test(msg)) {
-        setTxStatus('')
-        resetSign()
-        return
-      }
-      setTxStatus('')
-      setFieldError(msg || 'Check-in signature failed.')
-    }
+    setPendingAction('attend')
+    writeContract({
+      address: CONTRACT_ADDRESS,
+      abi: ABI,
+      functionName: 'attend',
+      args: [eventId],
+    })
   }
 
   const handleIssue = async (e) => {
@@ -920,7 +921,7 @@ export default function Dashboard() {
       return
     }
 
-    // Pre-check before wallet prompt — avoid failed txs in testnet history
+    // Pre-check before wallet — only issue if recipient already attended
     if (publicClient) {
       setIsPreChecking(true)
       setFieldError('')
@@ -942,19 +943,18 @@ export default function Dashboard() {
           functionName: 'events',
           args: [eventId],
         })
-        // events(): [id, name, date, metadata, organizer, isActive]
-        const organizer = ev[4]
+        // [organizer, date, isActive, name, metadata]
+        const organizer = ev[0]
         if (!sameAddress(organizer, address)) {
           setFieldError(
             'Only the event organizer can issue credentials for this event.'
           )
           return
         }
-        if (ev[5] !== true) {
+        if (ev[2] !== true) {
           setFieldError('This event is not active.')
           return
         }
-        // Organizer issues to attendees — never to themselves
         if (sameAddress(recipient, address) || sameAddress(recipient, organizer)) {
           setFieldError(
             'You cannot issue a credential to yourself. Enter an attendee wallet address.'
@@ -962,50 +962,30 @@ export default function Dashboard() {
           return
         }
 
-        // Check-in is gasless/off-chain; issue is the on-chain step (gas).
-        // Prefer on-chain mapping if contract was redeployed with hasCredential
-        try {
-          const already = await publicClient.readContract({
-            address: CONTRACT_ADDRESS,
-            abi: ABI,
-            functionName: 'hasCredential',
-            args: [eventId, recipient],
-          })
-          if (already) {
-            setFieldError(
-              'Credential already issued to this address for this event. One per attendee.'
-            )
-            return
-          }
-        } catch {
-          // Old contract without hasCredential — scan credentials array
-          const n = await publicClient.readContract({
-            address: CONTRACT_ADDRESS,
-            abi: ABI,
-            functionName: 'getCredentialCount',
-          })
-          const credCount = Number(n)
-          const eventIdNum = Number(issueEventId)
-          const recipientLower = recipient.toLowerCase()
-          for (let i = 0; i < credCount; i++) {
-            const cred = await publicClient.readContract({
-              address: CONTRACT_ADDRESS,
-              abi: ABI,
-              functionName: 'credentials',
-              args: [BigInt(i)],
-            })
-            // [id, eventId, recipient, issuedAt, isValid]
-            if (
-              Number(cred[1]) === eventIdNum &&
-              String(cred[2]).toLowerCase() === recipientLower &&
-              cred[4] === true
-            ) {
-              setFieldError(
-                `Already issued (Credential ID ${i}). One credential per attendee.`
-              )
-              return
-            }
-          }
+        const didAttend = await publicClient.readContract({
+          address: CONTRACT_ADDRESS,
+          abi: ABI,
+          functionName: 'attendance',
+          args: [eventId, recipient],
+        })
+        if (!didAttend) {
+          setFieldError(
+            'Recipient has not attended this event yet. They must Attend first.'
+          )
+          return
+        }
+
+        const already = await publicClient.readContract({
+          address: CONTRACT_ADDRESS,
+          abi: ABI,
+          functionName: 'hasCredential',
+          args: [eventId, recipient],
+        })
+        if (already) {
+          setFieldError(
+            'Credential already issued to this address for this event. One per attendee.'
+          )
+          return
         }
       } catch {
         // If pre-check fails, still allow tx — contract may revert
@@ -1180,10 +1160,10 @@ export default function Dashboard() {
   const panelDesc = {
     overview: 'Snapshot of your on-chain activity.',
     events: 'Browse and act on published events.',
-    create: 'Publish a new event on-chain (uses gas).',
-    attend: 'Free check-in — sign a message, no gas.',
-    issue: 'Mint a credential on-chain (uses gas).',
-    verify: 'Confirm a credential by ID (free).',
+    create: 'Publish a new event on-chain (gas-optimized).',
+    attend: 'Check in on-chain — required before issue.',
+    issue: 'Mint a credential only after the recipient attended.',
+    verify: 'Confirm a credential by ID (free view).',
   }[view]
 
   return (
@@ -1261,12 +1241,11 @@ export default function Dashboard() {
                   key="status"
                   status={fieldError || txStatus}
                   tone={
-                    fieldError || error || signError
+                    fieldError || error
                       ? 'error'
-                      : isSigning ||
-                          isPending ||
+                      : isPending ||
                           isConfirming ||
-                          /Confirm|Waiting|Sign the free/i.test(txStatus || '')
+                          /Confirm|Waiting/i.test(txStatus || '')
                         ? 'pending'
                         : isSuccess
                           ? 'success'
@@ -1276,7 +1255,6 @@ export default function Dashboard() {
                     setTxStatus('')
                     setFieldError('')
                     reset()
-                    resetSign()
                   }}
                 />
               )}
@@ -1337,13 +1315,13 @@ export default function Dashboard() {
                             id: 'attend',
                             icon: UserCheck,
                             title: 'Attend event',
-                            desc: 'Free check-in · no gas',
+                            desc: 'On-chain check-in (low gas)',
                           },
                           {
                             id: 'issue',
                             icon: BadgeCheck,
                             title: 'Issue credential',
-                            desc: 'On-chain mint · uses gas',
+                            desc: 'Only if they already attended',
                           },
                           {
                             id: 'verify',
@@ -1599,8 +1577,8 @@ export default function Dashboard() {
                                               )}
                                               {isMine && (
                                                 <p className="w-full text-[11px] text-muted-foreground">
-                                                  You are the organizer — others check in free
-                                                  (no gas); you issue credentials (uses gas).
+                                                  You are the organizer — others attend first;
+                                                  then you issue credentials.
                                                 </p>
                                               )}
                                             </>
@@ -1695,23 +1673,20 @@ export default function Dashboard() {
                   </div>
                 )}
 
-                {/* ── Attend (gasless) ── */}
+                {/* ── Attend ── */}
                 {view === 'attend' && (
                   <div className="mx-auto max-w-lg space-y-6">
                     <div>
                       <h2 className="text-2xl font-semibold tracking-tight">Attend</h2>
                       <p className="mt-1 text-sm text-muted-foreground">
-                        Free check-in: sign a message in your wallet.{' '}
-                        <span className="font-medium text-foreground">No gas</span> — this
-                        is not a blockchain transaction. Organizers pay gas only when they
-                        issue credentials.
+                        Check in to someone else&apos;s event on-chain. Optimized for low
+                        gas (one status write). Organizers cannot attend their own events.
                       </p>
                     </div>
                     <div className="rounded-md border border-border bg-muted px-3 py-2.5 text-xs text-muted-foreground">
-                      <span className="font-medium text-foreground">Gas free:</span> Attend
-                      uses a signature only. On-chain gas is only for{' '}
-                      <span className="text-foreground">Create event</span> and{' '}
-                      <span className="text-foreground">Issue credential</span>.
+                      After you attend, the organizer can{' '}
+                      <span className="text-foreground">Issue</span> a credential to your
+                      wallet. One check-in per event.
                     </div>
                     <form className="card space-y-4 p-5" onSubmit={handleAttend}>
                       {selectedEvent && (
@@ -1756,14 +1731,14 @@ export default function Dashboard() {
                             <span className="font-medium text-foreground">
                               You are the organizer.
                             </span>{' '}
-                            Share Event ID #{String(attendEventId)} so others can check in
-                            free. Then use <span className="text-foreground">Issue</span>{' '}
-                            to mint their credentials (you pay gas for issue).
+                            Share Event ID #{String(attendEventId)} so others can attend.
+                            Then use <span className="text-foreground">Issue</span> to mint
+                            their credentials.
                           </p>
                         </div>
                       )}
                       {!isOrganizerOfAttendEvent &&
-                        alreadyAttended &&
+                        alreadyAttended === true &&
                         attendIdParsed !== null && (
                         <div
                           role="status"
@@ -1776,7 +1751,7 @@ export default function Dashboard() {
                           <div className="min-w-0 flex-1 space-y-1">
                             <p className="leading-relaxed text-muted-foreground">
                               <span className="font-medium text-foreground">
-                                Already checked in (free).
+                                Already attended.
                               </span>{' '}
                               Share this address with the organizer so they can issue your
                               credential:
@@ -1793,27 +1768,28 @@ export default function Dashboard() {
                           className="btn btn-primary flex-1"
                           disabled={
                             busy ||
-                            alreadyAttended ||
-                            isOrganizerOfAttendEvent
+                            alreadyAttended === true ||
+                            isOrganizerOfAttendEvent ||
+                            isCheckingAttendance
                           }
-                          aria-busy={isPreChecking || isSigning}
+                          aria-busy={busy || isCheckingAttendance}
                         >
-                          {isPreChecking ? (
+                          {isPending || isConfirming ? (
+                            <>
+                              <Loader2 className="h-4 w-4 animate-spin" aria-hidden />
+                              Submitting…
+                            </>
+                          ) : isPreChecking || isCheckingAttendance ? (
                             <>
                               <Loader2 className="h-4 w-4 animate-spin" aria-hidden />
                               Checking…
                             </>
-                          ) : isSigning ? (
-                            <>
-                              <Loader2 className="h-4 w-4 animate-spin" aria-hidden />
-                              Sign in wallet…
-                            </>
                           ) : isOrganizerOfAttendEvent ? (
                             'Organizers cannot attend'
-                          ) : alreadyAttended ? (
-                            'Already checked in'
+                          ) : alreadyAttended === true ? (
+                            'Already attended'
                           ) : (
-                            'Check in free · no gas'
+                            'Attend event'
                           )}
                         </button>
                         <button
@@ -1836,15 +1812,15 @@ export default function Dashboard() {
                         Issue credential
                       </h2>
                       <p className="mt-1 text-sm text-muted-foreground">
-                        On-chain mint to an attendee wallet (uses gas). Check-in for them
-                        is free; this step writes the credential to BOT Chain.
+                        Mint a credential only to a wallet that already attended.
                         After success, a <strong className="font-medium text-foreground">Credential ID</strong> appears for verification.
                       </p>
                     </div>
                     <div className="rounded-md border border-border bg-muted px-3 py-2.5 text-xs text-muted-foreground">
-                      Requirements: you must be the{' '}
-                      <span className="text-foreground">event organizer</span>, enter the
-                      attendee&apos;s wallet (not yours), and this transaction uses gas.
+                      Requirements: you are the{' '}
+                      <span className="text-foreground">event organizer</span>, recipient
+                      has <span className="text-foreground">Attended</span>, and recipient
+                      is not your own wallet.
                     </div>
                     <form className="card space-y-4 p-5" onSubmit={handleIssue}>
                       {selectedEvent && (
@@ -1888,8 +1864,8 @@ export default function Dashboard() {
                           required
                         />
                         <p className="mt-1.5 text-xs text-muted-foreground">
-                          Paste the attendee&apos;s wallet (they check in free). Not your
-                          own organizer address.
+                          Paste the attendee&apos;s wallet — not your organizer address.
+                          They must have attended first.
                         </p>
                       </div>
                       <div className="flex flex-wrap gap-2">

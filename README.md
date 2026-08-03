@@ -45,11 +45,11 @@ Become the trusted infrastructure for digital credentials.
 
 | | Feature | Description |
 |:---:|---------|-------------|
-| 📅 | **Create Events** | Organisers publish on-chain events with name, date, and metadata. |
-| ✅ | **Attend / Check-in** | Participants connect a wallet and sign a transaction to record attendance. |
-| 🏅 | **Issue Credentials** | Organisers mint a verifiable credential (NFT/SBT) to any attendee’s wallet. |
-| 🔍 | **Verify** | Anyone checks credential validity by credential ID or wallet address. |
-| 📋 | **Event List** | Browse all events with attendee counts and status. |
+| 📅 | **Create Events** | Organisers publish on-chain events (gas-optimized storage). |
+| ✅ | **Attend / Check-in** | Participants check in on-chain (single status write — low gas). |
+| 🏅 | **Issue Credentials** | Organiser mints **only if** the recipient already attended. |
+| 🔍 | **Verify** | Anyone checks credential validity by ID (read-only, free). |
+| 📋 | **Event List** | Browse all events with status. |
 
 ---
 
@@ -59,26 +59,36 @@ Become the trusted infrastructure for digital credentials.
 
 ```
 Organiser ──create event──► BOT Chain
-Participant ──attend──► on-chain attendance
-Organiser ──issue credential──► wallet (immutable)
+Participant ──attend──► status = attended
+Organiser ──issue (only if attended)──► credential
 Anyone ──verify──► authenticity without third party
 ```
 
 </div>
 
+### Gas model (optimized contract)
+
+| Action | Who pays | Design |
+|--------|----------|--------|
+| Create event | Organiser | Packed struct, custom errors, lean events |
+| Attend | Participant | One `uint8` status SSTORE (no arrays) |
+| Issue credential | Organiser | Requires `attended`; one status upgrade + push |
+| Verify | Free | View call |
+
 ### 1. Organiser
 
 - Connect wallet (MetaMask)
 - Create an event with name, date, and description
-- Participants check in via wallet
-- Issue credentials to attendees
+- Wait for participants to attend
+- Issue credentials only to wallets that attended
 - Credentials are minted on-chain — immutable and permanent
 
 ### 2. Participant
 
 - Connect wallet
 - Browse events
-- Click **Attend** → sign the transaction
+- Click **Attend** → confirm the (low-gas) check-in tx
+- Share your wallet address with the organiser
 - Receive a credential after the organiser issues it
 
 ### 3. Verifier
@@ -115,10 +125,8 @@ Anyone ──verify──► authenticity without third party
 
 | Network | Address |
 |---------|---------|
-| **Testnet** | [`0xb73E31CA3eAD386661dcf92A7Fb461e02aC1518C`](https://scan.bohr.life/address/0xb73E31CA3eAD386661dcf92A7Fb461e02aC1518C) |
-| **Mainnet** | *update after mainnet deploy* |
-
-[View on BOTScan →](https://scan.bohr.life/address/0xb73E31CA3eAD386661dcf92A7Fb461e02aC1518C)
+| **Testnet** | [`0x3AaA20E9c56E7675e01cbad06359ceaEF429b5E7`](https://scan.bohr.life/address/0x3AaA20E9c56E7675e01cbad06359ceaEF429b5E7) |
+| **Mainnet** | [`0x360199E70FC97331C6404E9074f1Ff67f1da887A`](https://scan.bohr.life/address/0x360199E70FC97331C6404E9074f1Ff67f1da887A) |
 
 ---
 
