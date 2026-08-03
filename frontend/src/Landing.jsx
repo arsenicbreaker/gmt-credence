@@ -56,12 +56,12 @@ const FEATURES = [
   {
     icon: UserCheck,
     title: 'Attend',
-    desc: 'Connect a wallet and check in with a single transaction.',
+    desc: 'Free check-in with a wallet signature — no gas.',
   },
   {
     icon: BadgeCheck,
     title: 'Issue credentials',
-    desc: 'Mint a verifiable credential to any attendee address.',
+    desc: 'Mint a verifiable credential on-chain (uses gas).',
   },
   {
     icon: Search,

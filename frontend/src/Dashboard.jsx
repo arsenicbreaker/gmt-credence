@@ -1180,10 +1180,10 @@ export default function Dashboard() {
   const panelDesc = {
     overview: 'Snapshot of your on-chain activity.',
     events: 'Browse and act on published events.',
-    create: 'Publish a new event to BOT Chain.',
+    create: 'Publish a new event on-chain (uses gas).',
     attend: 'Free check-in — sign a message, no gas.',
     issue: 'Mint a credential on-chain (uses gas).',
-    verify: 'Confirm a credential by ID.',
+    verify: 'Confirm a credential by ID (free).',
   }[view]
 
   return (
@@ -1261,18 +1261,22 @@ export default function Dashboard() {
                   key="status"
                   status={fieldError || txStatus}
                   tone={
-                    fieldError || error
+                    fieldError || error || signError
                       ? 'error'
-                      : isSuccess && !txStatus.includes('Waiting') && !txStatus.includes('Confirm')
-                        ? 'success'
-                        : fieldError || error
-                          ? 'error'
+                      : isSigning ||
+                          isPending ||
+                          isConfirming ||
+                          /Confirm|Waiting|Sign the free/i.test(txStatus || '')
+                        ? 'pending'
+                        : isSuccess
+                          ? 'success'
                           : 'pending'
                   }
                   onDismiss={() => {
                     setTxStatus('')
                     setFieldError('')
                     reset()
+                    resetSign()
                   }}
                 />
               )}
