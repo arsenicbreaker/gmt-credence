@@ -27,7 +27,7 @@ import {
   XCircle,
 } from 'lucide-react'
 
-const CONTRACT_ADDRESS = '0x1b5c75806a5Ac1fa1428D9df45D79DD4d769f6b6'
+const CONTRACT_ADDRESS = '0xb73E31CA3eAD386661dcf92A7Fb461e02aC1518C'
 
 const ABI = [
   {
