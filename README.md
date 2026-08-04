@@ -115,7 +115,7 @@ Anyone ──verify──► authenticity without third party
 
 <div align="center">
 
-**[🔗 Open Credence](https://credence.example.com)**
+**[🔗 Open Credence](https://gmt-credence.vercel.app/)**
 
 </div>
 
