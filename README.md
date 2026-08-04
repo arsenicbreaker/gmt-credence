@@ -126,7 +126,7 @@ Anyone ──verify──► authenticity without third party
 | Network | Address |
 |---------|---------|
 | **Testnet** | [`0x3AaA20E9c56E7675e01cbad06359ceaEF429b5E7`](https://scan.bohr.life/address/0x3AaA20E9c56E7675e01cbad06359ceaEF429b5E7) |
-| **Mainnet** | [`0x360199E70FC97331C6404E9074f1Ff67f1da887A`](https://scan.bohr.life/address/0x360199E70FC97331C6404E9074f1Ff67f1da887A) |
+| **Mainnet** | [`0x360199E70FC97331C6404E9074f1Ff67f1da887A`](https://scan.botchain.ai/address/0x360199E70FC97331C6404E9074f1Ff67f1da887A) |
 
 ---
 
